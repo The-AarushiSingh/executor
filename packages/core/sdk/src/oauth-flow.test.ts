@@ -288,6 +288,30 @@ describe("oauth.start / oauth.complete", () => {
     }),
   );
 
+  it.effect("local user DCR is rejected before contacting the provider", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* serveOAuthTestServer();
+        const executor = yield* createExecutor(makeTestConfig({ plugins, subject: "local" }));
+        const error = yield* executor.oauth
+          .registerDynamicClient({
+            owner: "user",
+            slug: CLIENT,
+            issuer: server.issuerUrl,
+            registrationEndpoint: server.registrationEndpoint,
+            authorizationUrl: server.authorizationEndpoint,
+            tokenUrl: server.tokenEndpoint,
+            scopes: ["read"],
+            redirectUri: "http://localhost/callback",
+          })
+          .pipe(Effect.flip);
+        expect(Predicate.isTagged("StorageError")(error)).toBe(true);
+        expect(yield* server.requests).toEqual([]);
+        expect(yield* executor.oauth.listClients()).toEqual([]);
+      }),
+    ),
+  );
+
   it.effect("persists HTTP Basic client auth for code exchange and refresh", () =>
     Effect.scoped(
       Effect.gen(function* () {
