@@ -40,6 +40,9 @@ scenario(
               HttpClientRequest.setHeader(request, "authorization", `Bearer ${server.token}`),
             ),
           }).pipe(Effect.provide(FetchHttpClient.layer));
+          // The CLI fixture binds port0; pass its actual callback through the
+          // public override instead of its pre-bind default port.
+          const redirectUri = new URL("/api/oauth/callback", server.origin).toString();
           const endpoints = { authorizationUrl: `${base}/authorize`, tokenUrl: `${base}/token` };
           const slug = IntegrationSlug.make("local-oauth-owner");
           const registration = {
@@ -50,6 +53,7 @@ scenario(
             resource: `${base}/mcp`,
             scopes: ["repo", "read:user"],
             tokenEndpointAuthMethodsSupported: ["none"],
+            redirectUri,
             originIntegration: slug,
           };
           const rejected = yield* client.oauth
@@ -102,6 +106,7 @@ scenario(
               name: ConnectionName.make("main"),
               integration: slug,
               template: AuthTemplateSlug.make("oauth2"),
+              redirectUri,
             },
           });
           if (started.status !== "redirect") return yield* Effect.die("Expected OAuth redirect");
