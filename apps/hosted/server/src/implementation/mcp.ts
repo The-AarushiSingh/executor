@@ -15,6 +15,7 @@ import { appTargets, type McpBackend } from "@executor-js/mcp";
 import {
   AppNotFound,
   ElicitationFailed,
+  EventNotFound,
   type AppId,
   type ToolInvocationOptions,
 } from "@executor-js/sdk/core";
@@ -131,7 +132,10 @@ export const hostedMcpBackend = Effect.gen(function* () {
     subscribeEvent: ({ key, ...input }) =>
       Effect.gen(function* () {
         const { principal, subject } = yield* subscriber;
-        yield* eventApp(input.target.app);
+        // A saved subscription can name an app the caller no longer sees; to them it has no event.
+        yield* eventApp(input.target.app).pipe(
+          Effect.catchTag("AppNotFound", () => Effect.fail(new EventNotFound({ kind: "event" }))),
+        );
         return yield* (yield* sdk).events.subscribe({
           ...input,
           key: { ...key, principal },
