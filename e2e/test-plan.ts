@@ -46,6 +46,8 @@ export const TestPlan = Schema.Struct({
 });
 const scheduled = { status: "scheduled" } as const;
 const managedCloud = { status: "scheduled", runtime: "managed" } as const;
+/** Reads or writes app source, which needs Cloudflare Artifacts: managed local Cloud has none. */
+const sourceStorageCloud = { status: "scheduled", runtime: "attached" } as const;
 /** Runs alone on a managed local Cloud started with Better Auth's per-address limit on. */
 const rateLimitedCloud = { status: "scheduled", runtime: "rate-limited" } as const;
 const rolledBackCloud = { status: "scheduled", runtime: "rolled-back" } as const;
@@ -941,7 +943,7 @@ export const scenarios = plan({
     title: "Member restrictions keep controls visible and the app overview stable",
     targets: {
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
       local: na("Local has no organization member roles."),
     },
   },
@@ -951,7 +953,7 @@ export const scenarios = plan({
     title: "Mobile member restrictions keep controls visible and the app overview stable",
     targets: {
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
       local: na("Local has no organization member roles."),
     },
   },
@@ -1197,7 +1199,7 @@ export const scenarios = plan({
     title: "Skill editor saves minimal edits, deploys them and keeps drafts on conflict",
     targets: {
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
       local: na(
         "The shared editor and commit route are exercised through hosted organization routes.",
       ),
@@ -1331,7 +1333,7 @@ export const scenarios = plan({
     title: "Groups protect undeployed apps and independent copies",
     targets: {
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
       local: na("Local has no organization group policy."),
     },
   },
@@ -1385,7 +1387,7 @@ export const scenarios = plan({
     title: "Array account deletion preserves authoring access and clears profile bindings",
     targets: {
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
       local: na("Local has no organization sharing policy."),
     },
   },
@@ -2720,7 +2722,7 @@ export const scenarios = plan({
       "evaluated app declarations are reused only for identical inputs and never bypass access",
     targets: {
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
       local: na("Hosted members and app access use organization routes; see localAppDeclarations."),
     },
   },
@@ -2751,7 +2753,7 @@ export const scenarios = plan({
     title: "Workspace reads reuse confirmed source and preserve concurrent writes",
     targets: {
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
       local: na("The shared source contract is exercised through hosted organization routes."),
     },
   },
@@ -2761,7 +2763,7 @@ export const scenarios = plan({
     title: "Workspace reads return source saved by Git pushes and commits",
     targets: {
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
       local: na("The shared source contract is exercised through hosted organization routes."),
     },
   },
@@ -2771,7 +2773,7 @@ export const scenarios = plan({
     title: "Historical source deploys without downloading later revisions",
     targets: {
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
       local: na("The shared source contract is exercised through hosted organization routes."),
     },
   },
@@ -2781,7 +2783,7 @@ export const scenarios = plan({
     title: "App copies use running source and remain independent through edits and navigation",
     targets: {
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
       local: na("Hosted role checks use organization actors; local Git is covered separately."),
     },
   },
@@ -3346,7 +3348,7 @@ export const scenarios = plan({
       "App account sign-in starts OAuth without asking for a name and returns cancellation to the same app",
     targets: {
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
       local: na("Hosted browser sign-in and callback recovery."),
     },
   },
@@ -3778,7 +3780,7 @@ export const scenarios = plan({
     title: "hosted apps reload on deployment and recover missed version notifications",
     targets: {
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
       local: na("Local already has a deployment watcher; this covers hosted app sessions."),
     },
   },
@@ -3789,7 +3791,7 @@ export const scenarios = plan({
     title: "React app deployments compile Tailwind utilities and preserve ordinary styles",
     targets: {
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
       local: na(
         "This scenario uses hosted deployment and app authentication; local shares the workerd compiler.",
       ),
@@ -4324,7 +4326,7 @@ export const scenarios = plan({
     title: "Executor customization preserves personal accounts through the browser and MCP",
     targets: {
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
       local: na("Local uses its configured instance API key."),
     },
   },
@@ -4892,7 +4894,7 @@ export const scenarios = plan({
     targets: {
       local: na("Shared source viewer covered through hosted."),
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
     },
   },
   codeFormattingWorkspace: {
@@ -4902,7 +4904,7 @@ export const scenarios = plan({
     targets: {
       local: na("Shared source viewer covered through hosted."),
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
     },
   },
   codeFormattingLarge: {
@@ -4913,7 +4915,7 @@ export const scenarios = plan({
     targets: {
       local: na("Shared source viewer covered through hosted."),
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
     },
   },
   sourceDisplayBudget: {
@@ -4923,7 +4925,7 @@ export const scenarios = plan({
     targets: {
       local: na("Hosted source display budgets."),
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
     },
   },
   profileSetupStatus: {
@@ -4974,7 +4976,7 @@ export const scenarios = plan({
     targets: {
       local: na("Hosted browser authority journey."),
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
     },
   },
   hostedProfiles: {
@@ -5063,7 +5065,7 @@ export const scenarios = plan({
     title: "app workflows pin deployments and accounts and retry steps",
     targets: {
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
       local: na("This scenario uses hosted app and account management routes."),
     },
   },
@@ -5552,7 +5554,7 @@ export const scenarios = plan({
     title: "app skill deployments retain pinned history through updates and activation",
     targets: {
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
       local: na("This journey checks hosted skill authorization and deployments."),
     },
   },
