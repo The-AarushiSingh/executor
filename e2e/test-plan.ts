@@ -5389,17 +5389,19 @@ export const scenarios = plan({
       "Cloud onboarding can skip a passkey and returning email sign-in keeps the existing team",
     targets: cloudOnboarding,
   },
+  // The v1 check reads the emulated v1 database only a managed local Cloud has, and its
+  // scenarios write that database; deployed stages leave the check off.
   v1SignInStop: {
     file: "cloud-v1-sign-in.spec.ts",
     title:
       "Cloud sign-in keeps a new v1 organization member on v1 and fails closed while WorkOS is unavailable",
-    targets: cloudOnboarding,
+    targets: { ...cloudOnboarding, cloud: managedCloud },
   },
   v1SignInInvited: {
     file: "cloud-v1-sign-in.spec.ts",
     title:
       "Cloud sign-in keeps a new v1 organization member who joins an invited team from creating another, and fails closed while WorkOS is unavailable",
-    targets: cloudOnboarding,
+    targets: { ...cloudOnboarding, cloud: managedCloud },
   },
   v1SignInExisting: {
     file: "cloud-v1-sign-in.spec.ts",
@@ -5409,6 +5411,12 @@ export const scenarios = plan({
       // Backdating an account writes the managed Cloud's own database.
       cloud: managedCloud,
     },
+  },
+  v1SignInEmpty: {
+    file: "cloud-v1-sign-in.spec.ts",
+    title:
+      "Cloud sign-in admits members of only empty free v1 organizations, keeps members of paid or nonempty ones on v1, and fails closed while v1's database is unavailable",
+    targets: { ...cloudOnboarding, cloud: managedCloud },
   },
   localSkills: {
     file: "local-skills.spec.ts",
