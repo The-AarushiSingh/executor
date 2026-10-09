@@ -185,8 +185,10 @@ const packageRuntime = Effect.gen(function* () {
   // resume from durable alarms, so a finished engine leaves memory, and so could a waiting one,
   // but the host's reconciliation reads every open run every few seconds, which keeps it loaded.
   const workflowEngines = `(className="Engine",uniqueKey="executor-app-workflows",enableSql=true)`;
+  // `gc` lets each app bridge collect its isolate's garbage after a call; see worker-bridge.ts.
   const config = `using Workerd = import "/workerd/workerd.capnp";
 const config :Workerd.Config = (
+ v8Flags=["--expose-gc"],
  extensions=[(modules=[(name="cloudflare-runtime:workflows-wrapped-binding",internal=true,esModule=embed "@@RUNTIME@@/workflow-binding.mjs")])],
  services=[
   (name="product",worker=(

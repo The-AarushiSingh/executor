@@ -74,6 +74,7 @@ interface DataEntrypoint {
     controls: Callback | null,
   ): Promise<unknown>;
   cancel(id: string): Promise<void>;
+  unload(identity: string): Promise<boolean>;
   fetch(request: Request): Promise<Response>;
 }
 interface NativeStepPort {
@@ -192,6 +193,12 @@ const runner = (env: Environment, context: Pick<ExecutionContext, "waitUntil" | 
   makeAppRunner({
     loader: env.LOADER,
     residency: (residency ??= makeAppWorkerResidency(env.APP_WORKERS ?? defaultAppWorkerLimit)),
+    // A later call's trim runs this, so the stub is made then, in that call's request.
+    unloadFacet: (app, identity) =>
+      Effect.tryPromise({
+        try: () => env.DATA.getByName(app).unload(identity),
+        catch: (cause) => cause,
+      }),
     outbound: appOutbound(context),
     credentialKey: credentials(env),
     data: (app) => {
@@ -369,6 +376,9 @@ export class AppDataSupervisor extends DurableObject<Environment> {
   }
   async cancel(id: string) {
     return Effect.runPromise((await this.#supervisor).cancel(id));
+  }
+  async unload(identity: string) {
+    return Effect.runPromise((await this.#supervisor).unload(identity));
   }
   async alarm() {
     return Effect.runPromise((await this.#supervisor).recover);

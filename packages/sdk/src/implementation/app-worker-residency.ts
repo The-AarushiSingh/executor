@@ -3,7 +3,8 @@
  * Worker Loader entry by itself, so without a bound every app and account selection a process ever
  * called stays resident, and memory grows with them. A host that owns its workerd process gives
  * its runner this residency: it counts the calls in flight in each named Worker and, whenever more
- * Workers are loaded than the configured limit, unloads the least recently used idle ones. A Worker
+ * Workers are loaded than the configured limit, unloads the least recently used idle ones. The
+ * facet Workers that run database calls count against the same limit as app Workers. A Worker
  * with a call in flight, including an unfinished release, a paused elicitation or a running
  * workflow, is never unloaded, so no work is lost (a release that outlives its limit keeps its
  * hold until it settles); while every loaded Worker is busy the limit is
@@ -16,8 +17,11 @@ import type { WorkerLoader } from "@cloudflare/workers-types";
 import { Clock, Config, type Context, Effect, Option, Schema } from "effect";
 import { replaceWorker, unloadWorker } from "@executor-js/app-data/cloudflare";
 
-/** Loaded app Workers a self-host or local process keeps when no limit is configured. */
-export const defaultAppWorkerLimit = 32;
+/**
+ * Loaded app and facet Workers a self-host or local process keeps when no limit is configured: an
+ * app Worker and a facet Worker each for 32 apps with databases called in turn.
+ */
+export const defaultAppWorkerLimit = 64;
 /**
  * The operator's limit on loaded app Workers, `EXECUTOR_APP_WORKERS`. Each loaded Worker holds its
  * own isolate, so this bounds the memory app code uses however many apps and accounts are called.
@@ -33,17 +37,29 @@ interface Resident {
   active: number;
   lastUsed: number;
   unloading: Promise<void> | undefined;
+  readonly unload: Unload;
 }
+
+/** How to unload one resident Worker. */
+export interface Unload {
+  /** True once the runtime dropped the Worker, false when it could not. */
+  readonly run: Effect.Effect<boolean>;
+  /** Called when `run` did not settle in time; later calls must not reach the old Worker. */
+  readonly abandon: () => void;
+}
+
+/** Unload a Worker Loader entry by name; one that does not settle is replaced under a fresh name. */
+export const namedWorker = (loader: Pick<WorkerLoader, "get">, name: string): Unload => ({
+  run: Effect.promise(() => unloadWorker(loader, name)),
+  abandon: () => replaceWorker(name),
+});
 
 export interface AppWorkerResidency {
   /**
    * Hold a named Worker for one call. Waits while the name is being unloaded, and unloads idle
    * Workers above the limit before the call loads its own. Returns the call's release.
    */
-  readonly hold: (
-    loader: Pick<WorkerLoader, "get">,
-    name: string,
-  ) => Effect.Effect<Effect.Effect<void>>;
+  readonly hold: (name: string, unload: Unload) => Effect.Effect<Effect.Effect<void>>;
 }
 
 export const makeAppWorkerResidency = (limit: number): AppWorkerResidency => {
@@ -51,13 +67,12 @@ export const makeAppWorkerResidency = (limit: number): AppWorkerResidency => {
     throw new RangeError("The app Worker limit must be a positive integer");
   const residents = new Map<string, Resident>();
 
-  const unload = (loader: Pick<WorkerLoader, "get">, name: string, resident: Resident) =>
-    Effect.promise(() => unloadWorker(loader, name)).pipe(
+  const unload = (name: string, resident: Resident) =>
+    resident.unload.run.pipe(
       Effect.timeoutOption(unloadLimit),
       Effect.tap((settled) =>
         Effect.sync(() => {
-          // The runtime may still hold the old Worker; later calls must not reach it.
-          if (Option.isNone(settled)) replaceWorker(name);
+          if (Option.isNone(settled)) resident.unload.abandon();
         }),
       ),
       Effect.tap((settled) =>
@@ -78,7 +93,7 @@ export const makeAppWorkerResidency = (limit: number): AppWorkerResidency => {
     );
 
   /** Unload least recently used idle Workers until at most `limit` stay loaded. */
-  const trim = (loader: Pick<WorkerLoader, "get">) =>
+  const trim = () =>
     Effect.contextWith((services: Context.Context<never>) => {
       let loaded = 0;
       const idle: Array<[string, Resident]> = [];
@@ -93,14 +108,14 @@ export const makeAppWorkerResidency = (limit: number): AppWorkerResidency => {
         if (loaded <= limit) break;
         loaded--;
         // Claimed synchronously, so a call of this name waits instead of reaching the old Worker.
-        const unloading = Effect.runPromiseWith(services)(unload(loader, name, resident));
+        const unloading = Effect.runPromiseWith(services)(unload(name, resident));
         resident.unloading = unloading;
         unloads.push(unloading);
       }
       return unloads.length === 0 ? Effect.void : Effect.promise(() => Promise.all(unloads));
     });
 
-  const hold = (loader: Pick<WorkerLoader, "get">, name: string) =>
+  const hold = (name: string, unload: Unload) =>
     Effect.gen(function* () {
       let resident: Resident | undefined;
       while (resident === undefined) {
@@ -116,13 +131,14 @@ export const makeAppWorkerResidency = (limit: number): AppWorkerResidency => {
           active: 0,
           lastUsed: now,
           unloading: undefined,
+          unload,
         };
         resident.active++;
         resident.lastUsed = now;
         residents.set(name, resident);
       }
       const held = resident;
-      yield* trim(loader);
+      yield* trim();
       let released = false;
       return Clock.currentTimeMillis.pipe(
         Effect.flatMap((now) =>
@@ -131,7 +147,7 @@ export const makeAppWorkerResidency = (limit: number): AppWorkerResidency => {
             released = true;
             held.active--;
             held.lastUsed = now;
-            return trim(loader);
+            return trim();
           }),
         ),
       );

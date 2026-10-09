@@ -2366,6 +2366,32 @@ export const scenarios = plan({
       ),
     },
   },
+  appWorkerGarbageCollected: {
+    fixtures: "actors",
+    file: "app-worker-budget.spec.ts",
+    title:
+      "app Workers and data facets collect a call's garbage after it, though their heaps stay small",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Cloudflare collects Cloud's isolates itself."),
+      local: na(
+        "Self-host covers the shared runner's bridges; local starts its workerd with the same flags.",
+      ),
+    },
+  },
+  appDataFacetBudget: {
+    fixtures: "actors",
+    file: "app-worker-budget.spec.ts",
+    title: "data facets count against the configured app Worker limit as apps with databases grow",
+    serverEnvironment: { EXECUTOR_APP_WORKERS: String(appWorkerBudgetLimit) },
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Cloudflare unloads Cloud's facet Workers itself."),
+      local: na(
+        "Self-host covers the shared runner's Worker residency; the local budget scenario covers local's limit.",
+      ),
+    },
+  },
   oauthRefreshResilience: {
     fixtures: "actors",
     file: "oauth-refresh-resilience.spec.ts",
@@ -5291,6 +5317,17 @@ export const scenarios = plan({
     file: "telemetry-backpressure.spec.ts",
     title:
       "Crash reports a shedding collector refuses are resent after its Retry-After, within budget",
+    targets: {
+      "self-host": scheduled,
+      cloud: na(
+        "Cloud's Worker reads its collector address at start; only self-host starts a scenario-owned server.",
+      ),
+      local: na("Local uses the same relay; only self-host starts a scenario-owned server."),
+    },
+  },
+  appTelemetryBurst: {
+    file: "telemetry-backpressure.spec.ts",
+    title: "A burst of app calls behind a shedding collector delivers every call's app telemetry",
     targets: {
       "self-host": scheduled,
       cloud: na(

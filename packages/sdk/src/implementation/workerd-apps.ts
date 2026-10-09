@@ -142,6 +142,11 @@ export const workerdApps = (options: {
         return yield* new WorkerdMigrationRequired({ directory });
     }
     const handler = yield* workerdHostHandler(options);
+    // The runtime reads extra V8 flags for the workerd it starts from this variable. `gc` lets each
+    // app bridge collect its isolate's garbage after a call; see worker-bridge.ts.
+    const flags = process.env.ALCHEMY_WORKERD_V8_FLAGS ?? "";
+    if (!flags.split(/\s+/).includes("--expose-gc"))
+      process.env.ALCHEMY_WORKERD_V8_FLAGS = `${flags} --expose-gc`.trim();
     const runtimeContext = yield* Layer.build(
       layerLocalRuntime({ directory: options.directory }).pipe(
         // Registered as runtime plugins so their services reach the generated workerd config.
