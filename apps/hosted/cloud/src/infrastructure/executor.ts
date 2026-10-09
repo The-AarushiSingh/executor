@@ -109,7 +109,7 @@ export const cloudExecutor = Effect.fn(function* (
           clientName: hostedOAuthClientName,
           urlPolicy: egress.policy,
           ...(Option.isSome(clientMetadata) ? { clientMetadataUrl: clientMetadata.value.url } : {}),
-          // Clients saved before sign-ins moved to `executor.sh` keep the callback they registered.
+          // Entered clients saved before sign-ins moved to `executor.sh` keep the callback they name.
           ...(Option.isSome(accountCallbacks)
             ? { previousRedirectUris: accountCallbacks.value.previous }
             : {}),

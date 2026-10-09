@@ -503,8 +503,21 @@ export const makeOAuth = (
           ]),
         ).pipe(Effect.map((digest) => OAuthClientId.make(`client_${digest}`)));
       const now = yield* Clock.currentTimeMillis;
-      // A client saved at a callback this host sent before is registered with that callback only,
-      // so its sign-ins keep sending it. Every other sign-in sends the current callback.
+      // Import checks report the same choice for the providers they generate.
+      const registration =
+        discovered.grant === "authorization_code"
+          ? clientRegistration(
+              discovered.server,
+              method.tokenEndpointAuthMethod,
+              options.clientMetadataUrl,
+            )
+          : "manual";
+      // A client saved at a callback this host sent before is registered with that callback only.
+      // Executor can replace one it registered or read from its metadata document, so those sign
+      // in again at the current callback. Only a client someone entered, or one for a server that
+      // offers no other way, keeps sending the old callback, since only its owner can change what
+      // the provider allows. A record saved before sources were recorded counts as registered
+      // where the server registers clients.
       const previous =
         redirect === undefined
           ? []
@@ -526,6 +539,12 @@ export const makeOAuth = (
           const registered = yield* decrypt(id, saved.encrypted, OAuthRegistration);
           const metadata = yield* decrypt(id, saved.encrypted, OAuthSavedClientMetadata);
           if (
+            candidate !== redirect &&
+            metadata.executor_source !== "manual" &&
+            registration !== "manual"
+          )
+            continue;
+          if (
             registered.client_secret_expires_at !== undefined &&
             registered.client_secret_expires_at !== 0 &&
             registered.client_secret_expires_at * 1000 <= now
@@ -541,15 +560,6 @@ export const makeOAuth = (
           break;
         }
       const savedClient = client !== undefined;
-      // Import checks report the same choice for the providers they generate.
-      const registration =
-        discovered.grant === "authorization_code"
-          ? clientRegistration(
-              discovered.server,
-              method.tokenEndpointAuthMethod,
-              options.clientMetadataUrl,
-            )
-          : "manual";
       if (automatic && client === undefined && registration === "client_id_metadata_document") {
         const url =
           options.clientMetadataUrl === undefined

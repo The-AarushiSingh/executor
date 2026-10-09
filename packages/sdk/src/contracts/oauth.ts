@@ -311,8 +311,10 @@ export interface OAuthOptions {
   readonly urlPolicy: UrlPolicy;
   readonly clientMetadataUrl?: string;
   /**
-   * Callbacks this host sent as `redirect_uri` before its current one. A saved client registered
-   * with one of them keeps signing in there; new clients register the current callback.
+   * Callbacks this host sent as `redirect_uri` before its current one. A saved client someone
+   * entered at one of them keeps signing in there, as does one for a server that neither registers
+   * clients nor reads a metadata document. Executor registers every other client again at the
+   * current callback.
    */
   readonly previousRedirectUris?: readonly string[];
   /**

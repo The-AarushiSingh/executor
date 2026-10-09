@@ -230,7 +230,8 @@ export const canonicalResourceOrigin: CanonicalResourceOrigin = "role";
  * permanent `executor.sh` callback, which v1's edge forwards by the state prefix: the `redirect_uri`
  * new sign-ins send, the client metadata document lists and dynamic client registration
  * registers. `previous` is the deployment origin's callback (`v2.executor.sh`), the only one OAuth
- * clients saved before the move are registered with, so their sign-ins keep sending it. Both
+ * clients saved before the move are registered with. Entered clients keep sending it; Executor
+ * registers its own clients again at `current`. Both
  * bounce to the browser origin's callback page.
  */
 export interface AccountCallbacks {
