@@ -5928,6 +5928,11 @@ export const scenarios = plan({
     title: "Cloud passkey enrollment retains errors and focus during session refresh",
     targets: cloudOnboarding,
   },
+  cloudChangeEmail: {
+    file: "cloud-change-email.spec.ts",
+    title: "Cloud changes a user's email only after the current and new addresses return codes",
+    targets: cloudOnboarding,
+  },
 });
 
 /**

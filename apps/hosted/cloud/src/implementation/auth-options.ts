@@ -417,6 +417,9 @@ export const cloudAuthOptions = (
         storeOTP: "hashed",
         expiresIn: emailCodeExpiresIn,
         allowedAttempts: 3,
+        // A signed-in session alone cannot move the account: the current address approves the
+        // change with its own code, then the new address proves ownership with another.
+        changeEmail: { enabled: true, verifyCurrentEmail: true },
         // Better Auth sends sign-in codes to new emails too; their first code creates the account.
         sendVerificationOTP: async (data, ctx) => {
           const signUp =
