@@ -102,7 +102,7 @@ export const scenarios = plan({
     fixtures: "actors",
     file: "cloud-account-callback.spec.ts",
     title:
-      "Cloud connected-account sign-ins return through the deployment origin's callback to the browser origin, and the edge forwards v2's state prefix",
+      "Cloud connected-account sign-ins return through the edge's callback to the browser origin, and saved clients' deployment-origin callback still finishes there",
     targets: {
       cloud: managedCloud,
       "self-host": na("Self-host's callback is on its one origin; nothing forwards to it."),

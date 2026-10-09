@@ -490,40 +490,56 @@ export const makeOAuth = (
       // and entered clients are saved, and the metadata URL does not change them, so turning the
       // setting on or off keeps every saved client. The null once held that URL; it stays so
       // clients saved without the setting keep their keys.
-      const clientId = OAuthClientId.make(
-        `client_${yield* hash(
+      const keyFor = (callback: URL | undefined) =>
+        hash(
           JSON.stringify([
             input.owner,
             input.provider,
             input.method,
-            redirect?.href,
+            callback?.href,
             discovered.server.issuer,
             null,
             [...discovered.scopes].sort(),
           ]),
-        )}`,
-      );
+        ).pipe(Effect.map((digest) => OAuthClientId.make(`client_${digest}`)));
       const now = yield* Clock.currentTimeMillis;
-      const saved = automatic
-        ? yield* query(() => db.findFirst("oauthClients", { where: (b) => b("id", "=", clientId) }))
-        : null;
+      // A client saved at a callback this host sent before is registered with that callback only,
+      // so its sign-ins keep sending it. Every other sign-in sends the current callback.
+      const previous =
+        redirect === undefined
+          ? []
+          : (options.previousRedirectUris ?? []).flatMap((uri) => {
+              const url = parseEndpoint(uri, options.urlPolicy);
+              return url === undefined || url.href === redirect.href ? [] : [url];
+            });
+      let callback = redirect;
+      let clientId = yield* keyFor(redirect);
       let client: OAuthRegistration | undefined;
       let reused: { readonly version: Uint8Array; readonly source?: OAuthClientSource } | undefined;
-      if (saved !== null) {
-        const registered = yield* decrypt(clientId, saved.encrypted, OAuthRegistration);
-        const metadata = yield* decrypt(clientId, saved.encrypted, OAuthSavedClientMetadata);
-        if (
-          registered.client_secret_expires_at === undefined ||
-          registered.client_secret_expires_at === 0 ||
-          registered.client_secret_expires_at * 1000 > now
-        ) {
+      if (automatic)
+        for (const candidate of [redirect, ...previous]) {
+          const id = yield* keyFor(candidate);
+          const saved = yield* query(() =>
+            db.findFirst("oauthClients", { where: (b) => b("id", "=", id) }),
+          );
+          if (saved === null) continue;
+          const registered = yield* decrypt(id, saved.encrypted, OAuthRegistration);
+          const metadata = yield* decrypt(id, saved.encrypted, OAuthSavedClientMetadata);
+          if (
+            registered.client_secret_expires_at !== undefined &&
+            registered.client_secret_expires_at !== 0 &&
+            registered.client_secret_expires_at * 1000 <= now
+          )
+            continue;
+          callback = candidate;
+          clientId = id;
           client = registered;
           reused = {
             version: saved.encrypted,
             ...(metadata.executor_source === undefined ? {} : { source: metadata.executor_source }),
           };
+          break;
         }
-      }
       const savedClient = client !== undefined;
       // Import checks report the same choice for the providers they generate.
       const registration =
@@ -542,7 +558,16 @@ export const makeOAuth = (
         if (url === undefined) return yield* new OAuthSetupFailed({ reason: "invalid_client" });
         client = { client_id: url.href, token_endpoint_auth_method: "none" };
       }
-      return { method, redirect, discovered, clientId, client, savedClient, reused, registration };
+      return {
+        method,
+        redirect: callback,
+        discovered,
+        clientId,
+        client,
+        savedClient,
+        reused,
+        registration,
+      };
     });
   const oauthSetup = (input: typeof CheckOAuthSetup.Type) =>
     resolveSetup(input, true).pipe(
@@ -791,6 +816,7 @@ export const makeOAuth = (
         status: "redirect" as const,
         authorizationUrl: HttpUrl.make(authorization.authorizationUrl),
         expiresAt,
+        redirectUri: HttpUrl.make(redirect.href),
       };
     }).pipe(Effect.withSpan("oauth.beginOAuth"));
 
@@ -903,7 +929,11 @@ export const makeOAuth = (
       Effect.flatMap(({ attempt }) =>
         input.owner !== undefined && attempt.owner !== input.owner
           ? rejected("sign_in_not_found", "state", "callback_attempt_not_found")
-          : Effect.succeed({ owner: attempt.owner, connection: attempt.connection }),
+          : Effect.succeed({
+              owner: attempt.owner,
+              connection: attempt.connection,
+              redirectUri: attempt.redirectUri,
+            }),
       ),
       Effect.tapError((error) =>
         Schema.is(OAuthCompletionFailed)(error)
