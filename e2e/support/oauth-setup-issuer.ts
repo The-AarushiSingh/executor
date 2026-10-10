@@ -86,17 +86,6 @@ export const oauthSetupIssuer = Effect.gen(function* () {
    * as Miro does. Its client authentication methods disagree with the OAuth metadata's.
    */
   let openidAlgorithms: readonly string[] | undefined;
-  /**
-   * How the OpenID metadata location answers when it has algorithms to serve. The trailing-slash
-   * and uppercase-scheme issuers name the same URL as the OAuth metadata's but not the same string.
-   */
-  let openidMetadata:
-    | "served"
-    | "redirect"
-    | "unavailable"
-    | "another-issuer"
-    | "issuer-trailing-slash"
-    | "issuer-uppercase-scheme" = "served";
   let includeIdToken = false;
   let invalidNonce = false;
   /** The ID token `iss`; Google names its sign-in host rather than the token endpoint origin. */
@@ -516,8 +505,9 @@ export const oauthSetupIssuer = Effect.gen(function* () {
         if (code !== null) codes.delete(code);
         const origin = yield* Deferred.await(address);
         const now = Math.floor(Date.now() / 1000);
-        // A refreshed ID token carries no nonce (OpenID Connect Core 12.2).
-        const nonce = issued?.nonce ?? null;
+        // A refreshed ID token carries no nonce (OpenID Connect Core 12.2). `invalidNonce`
+        // names one the client never sent, on every ID token.
+        const nonce = invalidNonce ? "wrong-nonce" : (issued?.nonce ?? null);
         const jwt = [
           { alg: idTokenAlgorithm, kid: "synthetic-key", typ: "JWT" },
           {
@@ -526,7 +516,7 @@ export const oauthSetupIssuer = Effect.gen(function* () {
             sub: refreshing ? refreshSubject : "synthetic-subject",
             iat: now,
             exp: now + 3600,
-            ...(nonce === null ? {} : { nonce: invalidNonce ? "wrong-nonce" : nonce }),
+            ...(nonce === null ? {} : { nonce }),
           },
         ]
           .map((part) => Buffer.from(JSON.stringify(part)).toString("base64url"))
@@ -732,32 +722,7 @@ export const oauthSetupIssuer = Effect.gen(function* () {
       Effect.gen(function* () {
         discoveryRequests.push("/.well-known/openid-configuration");
         if (openidAlgorithms === undefined) return HttpServerResponse.empty({ status: 404 });
-        const origin = yield* Deferred.await(address);
-        // The target serves the same algorithms, so only a client that follows redirects uses them.
-        if (openidMetadata === "redirect")
-          return HttpServerResponse.empty({
-            status: 302,
-            headers: { location: `${origin}/redirected/openid-configuration` },
-          });
-        if (openidMetadata === "unavailable") return HttpServerResponse.empty({ status: 503 });
-        return yield* openidDocument(
-          openidMetadata === "another-issuer"
-            ? `${origin}/another-issuer`
-            : openidMetadata === "issuer-trailing-slash"
-              ? `${origin}/`
-              : openidMetadata === "issuer-uppercase-scheme"
-                ? origin.replace(/^http:/, "HTTP:")
-                : origin,
-          openidAlgorithms,
-        );
-      }),
-    ),
-    HttpRouter.add(
-      "GET",
-      "/redirected/openid-configuration",
-      Effect.gen(function* () {
-        discoveryRequests.push("/redirected/openid-configuration");
-        return yield* openidDocument(yield* Deferred.await(address), openidAlgorithms ?? []);
+        return yield* openidDocument(yield* Deferred.await(address), openidAlgorithms);
       }),
     ),
     HttpRouter.add(
@@ -953,7 +918,6 @@ export const oauthSetupIssuer = Effect.gen(function* () {
       readonly idTokenAlgorithms?: readonly string[] | null;
       /** Serve OpenID Connect Discovery with these ID token algorithms; null serves none. */
       readonly openidAlgorithms?: readonly string[] | null;
-      readonly openidMetadata?: typeof openidMetadata;
       readonly includeIdToken?: boolean;
       readonly idTokenIssuer?: string | null;
       readonly idTokenAlgorithm?: typeof idTokenAlgorithm;
@@ -1029,7 +993,6 @@ export const oauthSetupIssuer = Effect.gen(function* () {
             input.idTokenAlgorithms === null ? undefined : input.idTokenAlgorithms;
         if (input.openidAlgorithms !== undefined)
           openidAlgorithms = input.openidAlgorithms === null ? undefined : input.openidAlgorithms;
-        if (input.openidMetadata !== undefined) openidMetadata = input.openidMetadata;
         if (input.includeIdToken !== undefined) includeIdToken = input.includeIdToken;
         if (input.idTokenIssuer !== undefined)
           idTokenIssuer = input.idTokenIssuer === null ? undefined : input.idTokenIssuer;

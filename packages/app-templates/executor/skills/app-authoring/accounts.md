@@ -355,8 +355,8 @@ oauth2({
 
 The host still checks the document's `issuer` against the issuer discovered from
 `discover`. It applies its network policy and never follows a redirect or falls
-back to another document when the explicit URL fails. Signing algorithms and
-JWKS come from the validated metadata; validation cannot be disabled.
+back to another document when the explicit URL fails. The endpoints come from the
+validated metadata; the issuer check cannot be disabled.
 
 For MCP discovery, explicit `scopes` take precedence over the resource's Bearer
 challenge scope, which takes precedence over its protected-resource metadata

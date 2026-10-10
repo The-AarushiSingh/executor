@@ -1081,10 +1081,7 @@ export type OAuthAttemptId = typeof OAuthAttemptId.Type;
 
 /** Validated subset of authorization-server metadata used for saved grants. */
 export const OAuthTokenServer = Schema.Struct({
-  /**
-   * Microsoft identity platform's multi-tenant metadata publishes a `{tenantid}` template here;
-   * each ID token's `iss` is that template with the token's own `tid` claim substituted.
-   */
+  /** Microsoft identity platform's multi-tenant metadata publishes a `{tenantid}` template here. */
   issuer: HttpUrl,
   /**
    * The provider declared endpoints without an issuer. Executor derives `issuer` from the token
@@ -1097,7 +1094,6 @@ export const OAuthTokenServer = Schema.Struct({
   /** RFC 7009 endpoint. Optional so grants saved before it was retained still decode. */
   revocation_endpoint: Schema.optional(HttpUrl),
   jwks_uri: Schema.optional(HttpUrl),
-  id_token_signing_alg_values_supported: Schema.optional(Schema.Array(Schema.String)),
   authorization_response_iss_parameter_supported: Schema.optional(Schema.Boolean),
   client_id_metadata_document_supported: Schema.optional(Schema.Boolean),
   code_challenge_methods_supported: Schema.optional(Schema.Array(Schema.String)),
@@ -1237,7 +1233,6 @@ const attemptFields = {
   redirectUri: HttpUrl,
   state: Schema.NonEmptyString,
   verifier: Schema.NonEmptyString,
-  nonce: Schema.optional(Schema.NonEmptyString),
   response: JsonObject,
 };
 /** Protocol context frozen when authorization starts, preventing callback-supplied identity changes. */
@@ -1299,15 +1294,6 @@ export const OAuthGrant = Schema.Union([
     server: OAuthServer,
     client: OAuthRegistration,
     refreshToken: Schema.optional(Schema.NonEmptyString),
-    /** The first validated ID token's `sub`. A refreshed ID token must keep it (OIDC Core §12.2). */
-    idTokenSubject: Schema.optional(Schema.NonEmptyString),
-    /**
-     * The first validated ID token's `iss`, saved with its `sub` because a subject is only unique
-     * at its issuer. A refreshed ID token must keep it too. It differs from `server.issuer` only
-     * for a Microsoft `{tenantid}` template, where each token names its own tenant. Grants saved
-     * before this field keep a fixed server issuer, which every ID token must already match.
-     */
-    idTokenIssuer: Schema.optional(Schema.NonEmptyString),
     /** Nested grant location frozen at sign-in; renewals read the same member. */
     tokenResponse: Schema.optional(OAuthTokenResponse),
     generation: grantGeneration,
@@ -1335,8 +1321,6 @@ export const OAuthGrant = Schema.Union([
     expiresAt: Schema.optional(Schema.Number),
     fields: JsonObject,
     refreshToken: Schema.optional(Schema.NonEmptyString),
-    idTokenSubject: Schema.optional(Schema.NonEmptyString),
-    idTokenIssuer: Schema.optional(Schema.NonEmptyString),
     generation: Schema.Int,
   }),
 ]);

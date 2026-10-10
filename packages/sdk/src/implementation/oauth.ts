@@ -81,7 +81,6 @@ import { query, transaction, type Query } from "./database.ts";
 import { storedProfile } from "./profiles.ts";
 import {
   clientRegistration,
-  idTokenIdentity,
   isOAuthErrorResponse,
   makeOAuthProtocol,
   type OAuthProtocolFailed,
@@ -173,7 +172,6 @@ type ReconnectReason =
   | "renewal_interrupted"
   | "not_renewable"
   | "renewal_refused"
-  | "identity_changed"
   | "scope_exceeded";
 
 /** Span attributes for a safe failure cause, matching the protocol spans' attribute names. */
@@ -261,32 +259,28 @@ const outcome = (error: OAuthProtocolFailed) =>
  * - A response Executor cannot use, including a malformed 2xx or a 4xx without an error body, is
  *   a compatibility problem.
  *
- * Two failures other than `invalid_grant` do end the grant: a token endpoint the host policy now
- * refuses cannot renew this saved grant, and a refreshed ID token for a different end user (OIDC
- * Core §12.2) means the grant no longer belongs to this account's identity. A new sign-in settles
- * both.
+ * One other failure ends the grant: a token endpoint the host policy now refuses cannot renew
+ * this saved grant. A new sign-in settles it.
  */
 const renewalOutcome = (error: OAuthProtocolFailed): "reconnect" | OAuthRenewalFailed["reason"] =>
-  error.reason === "subject_changed"
-    ? "reconnect"
-    : Match.value(outcome(error)).pipe(
-        Match.when("blocked", () => "reconnect" as const),
-        Match.when("unavailable", () => "service_unavailable" as const),
-        Match.when("limited", () => "rate_limited" as const),
-        Match.when("rejected", () =>
-          error.reason === "invalid_grant"
-            ? ("reconnect" as const)
-            : error.reason === "invalid_client" ||
-                error.providerError === "unauthorized_client" ||
-                error.status === 401
-              ? ("client_rejected" as const)
-              : isOAuthErrorResponse(error)
-                ? ("renewal_rejected" as const)
-                : ("incompatible_response" as const),
-        ),
-        Match.whenOr("incompatible", "unanswered", () => "incompatible_response" as const),
-        Match.exhaustive,
-      );
+  Match.value(outcome(error)).pipe(
+    Match.when("blocked", () => "reconnect" as const),
+    Match.when("unavailable", () => "service_unavailable" as const),
+    Match.when("limited", () => "rate_limited" as const),
+    Match.when("rejected", () =>
+      error.reason === "invalid_grant"
+        ? ("reconnect" as const)
+        : error.reason === "invalid_client" ||
+            error.providerError === "unauthorized_client" ||
+            error.status === 401
+          ? ("client_rejected" as const)
+          : isOAuthErrorResponse(error)
+            ? ("renewal_rejected" as const)
+            : ("incompatible_response" as const),
+    ),
+    Match.whenOr("incompatible", "unanswered", () => "incompatible_response" as const),
+    Match.exhaustive,
+  );
 
 const registrationFailed = (error: OAuthProtocolFailed, callbackUrl: typeof HttpUrl.Type) => {
   const reason = Match.value(outcome(error)).pipe(
@@ -605,7 +599,6 @@ export const makeOAuth = (
               "invalid_response",
               "invalid_client",
               "invalid_grant",
-              "subject_changed",
               () => "discovery_invalid" as const,
             ),
             Match.exhaustive,
@@ -1299,7 +1292,6 @@ export const makeOAuth = (
       const completedAt = yield* Clock.currentTimeMillis;
       const issued = {
         response: attempt.response,
-        ...idTokenIdentity(tokens),
         fields,
         ...(tokens.refresh_token === undefined ? {} : { refreshToken: tokens.refresh_token }),
         ...expiry(completedAt, tokens.expires_in),
@@ -1507,7 +1499,6 @@ export const makeOAuth = (
               return {
                 outcome,
                 cause: causeOf(stage, error),
-                identityChanged: error.reason === "subject_changed",
                 retry: retryAfterOf(outcome, error),
                 exceeded: undefined,
               };
@@ -1520,7 +1511,6 @@ export const makeOAuth = (
               (tokens) => ({
                 outcome: "reconnect" as const,
                 cause: { stage, field: "scope" } satisfies OAuthFailureCause,
-                identityChanged: false,
                 retry: {},
                 exceeded: { refreshToken: tokens.refresh_token, accessToken: tokens.access_token },
               }),
@@ -1531,7 +1521,6 @@ export const makeOAuth = (
                 Effect.mapError(() => ({
                   outcome: "incompatible_response" as const,
                   cause: { stage } satisfies OAuthFailureCause,
-                  identityChanged: false,
                   retry: {},
                   exceeded: undefined,
                 })),
@@ -1541,7 +1530,7 @@ export const makeOAuth = (
             Effect.result,
           );
           if (result._tag === "Failure") {
-            const { outcome, cause, identityChanged, retry, exceeded } = result.failure;
+            const { outcome, cause, retry, exceeded } = result.failure;
             yield* Effect.annotateCurrentSpan("oauth.renewal.outcome", outcome);
             const released = `ready_${yield* nextId}`;
             // Only the process holding the claim may settle it. Otherwise another process has
@@ -1581,14 +1570,7 @@ export const makeOAuth = (
             }
             if (!settled) return undefined;
             if (outcome === "reconnect")
-              return yield* reconnect(
-                identityChanged
-                  ? "identity_changed"
-                  : abandoned
-                    ? "renewal_interrupted"
-                    : "renewal_refused",
-                cause,
-              );
+              return yield* reconnect(abandoned ? "renewal_interrupted" : "renewal_refused", cause);
             // The grant is kept, and a renewal ahead of expiry leaves its token valid. Callers
             // that waited for this renewal use that token, and so does this one. The next use
             // inside the renewal window tries again. A token the service refused, or one that has

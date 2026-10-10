@@ -2120,7 +2120,7 @@ export const scenarios = plan({
     fixtures: "actors",
     file: "oauth-compatibility.spec.ts",
     title:
-      "OAuth accepts compatible registration and token variants, classifies registration failures, and keeps token validation",
+      "OAuth accepts compatible registration and token variants, sends no nonce, ignores ID tokens, and classifies registration failures",
     targets: {
       "self-host": scheduled,
       cloud: na("Uses a scoped loopback issuer with controlled wire responses."),
@@ -2154,7 +2154,7 @@ export const scenarios = plan({
     fixtures: "actors",
     file: "oauth-error-responses.spec.ts",
     title:
-      "OAuth classifies token and callback error responses, accepts ID token algorithms advertised only in OpenID metadata, and rejects unsigned and mismatched ID tokens",
+      "OAuth classifies token and callback error responses, ignores ID tokens it cannot validate on sign-in, and renews when a refreshed ID token names another subject",
     targets: {
       "self-host": scheduled,
       cloud: na("Uses a scoped loopback issuer with controlled wire responses."),
@@ -2856,7 +2856,7 @@ export const scenarios = plan({
     fixtures: "actors",
     file: "oauth-diagnostics.spec.ts",
     title:
-      "OAuth failures deliver safe provider, challenge, claim and callback diagnostics, and a successful discovery fallback records no error",
+      "OAuth failures deliver safe provider, challenge and callback diagnostics, and a successful discovery fallback records no error",
     targets: {
       "self-host": scheduled,
       cloud: na("Uses a scoped loopback issuer to provoke OAuth failures."),
@@ -3298,7 +3298,7 @@ export const scenarios = plan({
     fixtures: "actors",
     file: "oauth-interop.spec.ts",
     title:
-      "OAuth signs in to Microsoft Entra without a resource indicator and checks each tenant's ID token issuer",
+      "OAuth signs in to Microsoft Entra without a resource indicator or nonce and ignores each tenant's ID token issuer",
     targets: {
       "self-host": scheduled,
       cloud: na("Uses a scoped loopback OAuth issuer."),
@@ -3309,7 +3309,7 @@ export const scenarios = plan({
     fixtures: "actors",
     file: "oauth-interop.spec.ts",
     title:
-      "OAuth renews a Microsoft Entra multi-tenant grant only while refreshed ID tokens keep the signed-in tenant's issuer",
+      "OAuth renews a Microsoft Entra multi-tenant grant even when a refreshed ID token names another tenant",
     targets: {
       "self-host": scheduled,
       cloud: na("Uses a scoped loopback OAuth issuer."),
@@ -3390,7 +3390,8 @@ export const scenarios = plan({
   oauthMetadataOverride: {
     fixtures: "actors",
     file: "oauth-metadata-override.spec.ts",
-    title: "OAuth metadata overrides validate ES256 and issuer while MCP challenges select scopes",
+    title:
+      "OAuth metadata overrides validate the issuer, ID tokens never block sign-in, and MCP challenges select scopes",
     targets: {
       "self-host": scheduled,
       cloud: na("Uses a scoped loopback OAuth issuer."),
@@ -3523,7 +3524,7 @@ export const scenarios = plan({
     fixtures: "actors",
     file: "oauth-declared-endpoints.spec.ts",
     title:
-      "Declared OAuth endpoints accept the service's callback and ID token issuer, refresh, and, like discovered servers open to public and secret clients, leave client authentication to the client",
+      "Declared OAuth endpoints accept the service's callback issuer, ignore ID tokens, refresh, and, like discovered servers open to public and secret clients, leave client authentication to the client",
     targets: {
       "self-host": scheduled,
       cloud: na("Uses a scoped loopback OAuth issuer."),
