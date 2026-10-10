@@ -153,10 +153,14 @@ export const workerdApps = (options: {
     }
     const handler = yield* workerdHostHandler(options);
     // The runtime reads extra V8 flags for the workerd it starts from this variable. `gc` lets each
-    // app bridge collect its isolate's garbage after a call; see worker-bridge.ts.
-    const flags = process.env.ALCHEMY_WORKERD_V8_FLAGS ?? "";
-    if (!flags.split(/\s+/).includes("--expose-gc"))
-      process.env.ALCHEMY_WORKERD_V8_FLAGS = `${flags} --expose-gc`.trim();
+    // app bridge collect its isolate's garbage after a call; see worker-bridge.ts. Without
+    // `--no-flush-liftoff-code`, each new isolate drops and recompiles the build's WebAssembly code
+    // and the process keeps the dropped pages; see the self-host runtime config.
+    const flags = (process.env.ALCHEMY_WORKERD_V8_FLAGS ?? "").split(/\s+/).filter(Boolean);
+    process.env.ALCHEMY_WORKERD_V8_FLAGS = [
+      ...flags,
+      ...["--expose-gc", "--no-flush-liftoff-code"].filter((flag) => !flags.includes(flag)),
+    ].join(" ");
     const runtimeContext = yield* Layer.build(
       layerLocalRuntime({ directory: options.directory }).pipe(
         // Registered as runtime plugins so their services reach the generated workerd config.

@@ -186,9 +186,15 @@ const packageRuntime = Effect.gen(function* () {
   // but the host's reconciliation reads every open run every few seconds, which keeps it loaded.
   const workflowEngines = `(className="Engine",uniqueKey="executor-app-workflows",enableSql=true)`;
   // `gc` lets each app bridge collect its isolate's garbage after a call; see worker-bridge.ts.
+  // workerd signals memory pressure whenever it creates an isolate, and V8 then drops the Liftoff
+  // code of every WebAssembly module in the process: the product's PGlite and the runner's esbuild.
+  // Each module compiles that code again on its next use into new code pages, while the dropped
+  // code's pages stay resident. Every deployment and every cold app load creates an isolate, so the
+  // process grew by about 9 MB for each app installed and never shrank. Keeping the code is bounded
+  // by the modules' size.
   const config = `using Workerd = import "/workerd/workerd.capnp";
 const config :Workerd.Config = (
- v8Flags=["--expose-gc"],
+ v8Flags=["--expose-gc","--no-flush-liftoff-code"],
  extensions=[(modules=[(name="cloudflare-runtime:workflows-wrapped-binding",internal=true,esModule=embed "@@RUNTIME@@/workflow-binding.mjs")])],
  services=[
   (name="product",worker=(
