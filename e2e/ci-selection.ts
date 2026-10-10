@@ -555,6 +555,7 @@ const suiteConfigs: Record<string, () => Promise<unknown>> = {
   "emulator-failures.config.ts": () => import("./emulator-failures.config.ts"),
   "docker-release.config.ts": () => import("./docker-release.config.ts"),
   "local-bootstrap.config.ts": () => import("./local-bootstrap.config.ts"),
+  "npm-launcher.config.ts": () => import("./npm-launcher.config.ts"),
   "pglite.config.ts": () => import("./pglite.config.ts"),
   "prepare-cache.config.ts": () => import("./prepare-cache.config.ts"),
   "release-archives.config.ts": () => import("./release-archives.config.ts"),

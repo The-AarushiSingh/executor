@@ -1039,6 +1039,19 @@ export const scenarios = plan({
       "self-host": na("Local key storage"),
     },
   },
+  localBootstrapPair: {
+    file: "local-bootstrap.spec.ts",
+    title:
+      "local pair sends the key where the directory keeps it to its running server and never creates, replaces or moves keys",
+    targets: {
+      local: {
+        status: "not-run",
+        reason: "Runs against the installed release archive with local-bootstrap.config.ts.",
+      },
+      cloud: na("Local key storage"),
+      "self-host": na("Local key storage"),
+    },
+  },
   memberControls: {
     fixtures: "actors",
     file: "member-controls.spec.ts",
@@ -1075,6 +1088,26 @@ export const scenarios = plan({
       local: scheduled,
       "self-host": na("The self-host image's engine is covered by the Docker release suite."),
       cloud: na("Cloudflare runs Cloud's workflow engines."),
+    },
+  },
+  localPair: {
+    file: "local-pair.spec.ts",
+    title:
+      "local pair prints a link for the running server and explains missing keys, a rejected key, a wrong port or another service on it without changing keys",
+    targets: {
+      local: scheduled,
+      cloud: na("Local CLI pairing"),
+      "self-host": na("Local CLI pairing"),
+    },
+  },
+  localCliLegacyCommands: {
+    file: "local-cli-legacy-commands.spec.ts",
+    title:
+      "local CLI answers Executor 1 commands and their flags with the Executor 2 replacement and keeps them out of help",
+    targets: {
+      local: scheduled,
+      cloud: na("Local CLI commands"),
+      "self-host": na("Local CLI commands"),
     },
   },
   localStartupObservability: {

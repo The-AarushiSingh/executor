@@ -823,9 +823,22 @@ the CLI with a stand-in keyring module that reproduces the package's errors: an
 absent store, a cancelled or dismissed prompt, and a store that grants access.
 Only an absent store may fall back to `keys.json`. The key storage scenario
 covers `EXECUTOR_KEY_STORAGE`: `file` on a new or denied-pending directory,
-no-ops on matching directories, refusals on mismatched ones, and invalid values. On Linux outside a D-Bus
+no-ops on matching directories, refusals on mismatched ones, and invalid values. The pair scenario
+pairs with a running server whose key is in the stand-in store, and refuses denied, absent, missing
+and unfinished keys without writing anything. On Linux outside a D-Bus
 session, set `EXECUTOR_E2E_CREDENTIAL_STORE=absent` to use the real missing
 Secret Service for the key file scenario instead; release CI runs both.
+
+The npm launcher scenario unpacks the launcher and native archives as npm lays
+them out, then starts `--version` through every launcher entry point, including
+Executor 1's `bin/executor`, which stale command shims still start:
+
+```sh
+bun run release:wrapper
+EXECUTOR_E2E_LAUNCHER_ARCHIVE=.local/releases/<version>/wrapper/executor-<version>.tgz \
+EXECUTOR_E2E_RUNTIME_ARCHIVE=/path/to/executor-<version>-<platform>-<arch>.tgz \
+  bunx vitest run --config e2e/npm-launcher.config.ts
+```
 
 The desktop artifact smoke uses the packaged executable, synthetic secrets and a
 fresh profile/data directory. It deploys a dependency-using app, calls it, closes
