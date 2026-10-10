@@ -1,7 +1,7 @@
 /** Cloud sign-in policy; self-hosted deployments do not need these OAuth credentials. */
 import type { BetterAuthOptions } from "better-auth";
 import { APIError } from "better-auth/api";
-import { authOptions } from "@executor-js/hosted-server";
+import { authOptions, type RefreshRejection } from "@executor-js/hosted-server";
 import { HttpUrl } from "@executor-js/sdk/core";
 import { cloudHosts, type CloudHosts } from "../infrastructure/stage.ts";
 import { passkey } from "@better-auth/passkey";
@@ -186,9 +186,9 @@ export const cloudAuthOptions = (
   onLogin?: (userId: string) => Promise<void>,
   onOperation?: (usage: NativeAuthUsage) => Promise<void>,
   allowsOrganization?: (userId: string) => Promise<boolean>,
-  onRefreshFamilyRevoked?: () => void,
+  onRefreshRejected?: (rejection: RefreshRejection) => void,
 ) => {
-  const base = authOptions(settings, ipAddressHeaders, onRefreshFamilyRevoked);
+  const base = authOptions(settings, ipAddressHeaders, onRefreshRejected);
   // A test stage that signs in through production's proxy uses production's callback, which the
   // proxy sets. Every other deployment names its own social callback origin explicitly.
   const proxiedElsewhere = Option.exists(
