@@ -154,6 +154,13 @@ export const createExecutor = (
       options.hooks,
     );
     const connections = makeAccountConnections(db, credentials, crypto, options.hooks);
+    const { add, replaceCredentials, ...accountOperations } = makeAccounts(
+      db,
+      credentials,
+      crypto,
+      options.hooks,
+      oauth.revokeRemoved,
+    );
     const { checkCredentials, ...accountHealth } = makeAccountHealth(
       db,
       runtime,
@@ -210,10 +217,8 @@ export const createExecutor = (
       scheduler: schedules.dispatcher,
       events,
       schedules: schedules.operations,
-      accounts: {
-        ...makeAccounts(db, credentials, crypto, options.hooks, oauth.revokeRemoved),
-        ...accountHealth,
-      },
+      accounts: { ...accountOperations, ...accountHealth },
+      managedAccounts: { add, replaceCredentials },
       accountConnections: {
         ...connections,
         ...oauth.connections,

@@ -6180,6 +6180,35 @@ export const scenarios = plan({
       ),
     },
   },
+  legacyTargetlessConnections: {
+    legacyStorage: true,
+    file: "legacy-targetless-connections.spec.ts",
+    title:
+      "upgrading deletes connections stored without an app target and their sign-ins, and keeps targeted ones",
+    targets: {
+      local: scheduled,
+      "self-host": na(
+        "Self-host runs the same SDK step, with its product's access rows, in the hosted scenario.",
+      ),
+      cloud: na(
+        "Legacy rows need a runner-owned database; Cloud cases share one Worker and database.",
+      ),
+    },
+  },
+  legacyTargetlessHostedConnections: {
+    fixtures: "actors",
+    legacyStorage: true,
+    file: "legacy-targetless-connections.spec.ts",
+    title:
+      "upgrading a hosted database deletes targetless connections with their access rows and then requires a target",
+    targets: {
+      "self-host": scheduled,
+      cloud: na(
+        "Legacy rows need a runner-owned database; Cloud cases share one Worker and database.",
+      ),
+      local: na("Local has no organization access rows; the local scenario covers its storage."),
+    },
+  },
   legacyConnectionFailure: {
     legacyStorage: true,
     file: "legacy-connection-failure.spec.ts",

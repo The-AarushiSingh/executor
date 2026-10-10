@@ -34,11 +34,11 @@ export interface AccountConnectionCompletion {
   readonly id: AccountConnectionId;
   readonly owner: import("./shared.ts").OwnerId;
   readonly reconnectAccount: import("./shared.ts").AccountId | null;
-  /** The profile the connection targets, as stored now; null for a plain account connection. */
+  /** The profile the connection targets, as stored now. */
   readonly target: {
     readonly app: import("./shared.ts").AppId;
     readonly profile: import("./profiles.ts").Profile;
-  } | null;
+  };
 }
 /** Product metadata participates in the resource transaction; hooks must perform no external I/O. */
 export interface ResourceLifecycle {
@@ -228,6 +228,11 @@ export type Executor = Omit<
   readonly scheduler: import("./scheduler.ts").ScheduleDispatcher;
   /** Host-only: products authorize every event operation before calling it. */
   readonly events: import("./events.ts").ExecutorEvents;
+  /**
+   * Host-only: credential writes for accounts the product provisions itself, such as its own API
+   * access. Everyone else saves credentials through an app's connection request.
+   */
+  readonly managedAccounts: import("./account.ts").ManagedAccounts;
 };
 
 type Promisify<T> = T extends (...args: infer Args) => Effect.Effect<infer A, infer _E, never>
@@ -244,6 +249,7 @@ export type PromiseExecutor = Promisify<
     | typeof StorageHost
     | "scheduler"
     | "events"
+    | "managedAccounts"
     | "tools"
   > & { readonly tools: Omit<Executor["tools"], "approval"> }
 >;

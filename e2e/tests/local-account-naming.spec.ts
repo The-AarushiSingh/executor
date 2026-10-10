@@ -135,6 +135,23 @@ export default defineApp({ accounts: { service } }, async () => ({ tools: router
           ],
           ["POST", `/dashboard/api/accounts/${accounts[0]}/oauth/start`, {}],
           ["POST", "/dashboard/api/accounts/oauth/start", { provider, method: "key" }],
+          // Nor can an agent save or replace credentials through the API: they go through a
+          // connection link the user completes.
+          [
+            "POST",
+            "/v1/accounts",
+            {
+              owner: "local",
+              provider,
+              method: "key",
+              fields: { token: "synthetic-local-naming-token" },
+            },
+          ],
+          [
+            "PUT",
+            `/v1/accounts/${accounts[0]}/credentials`,
+            { fields: { token: "synthetic-local-naming-token" } },
+          ],
         ] as const)
           expect((yield* session.send(method, path, payload, headers)).status, path).toBe(404);
         expect(

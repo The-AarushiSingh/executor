@@ -237,7 +237,7 @@ return await tools.search({ query: "Executor" });
 
 Search returns exact callable paths, one-line descriptions and input types;
 `tools.search.describe({ paths })` returns full signatures. The Executor app exposes
-`deployApp`, `addApp`, `listApps`, `getApp`, `addAccount`, `listAccounts`,
+`deployApp`, `addApp`, `listApps`, `getApp`, `listAccounts`,
 `getAccount`, `activateDeployment` and `listTools`. Account selections use
 `apps.profiles` with an explicit profile and expected revision.
 It calls this server's API through an ordinary selected account. The host uses

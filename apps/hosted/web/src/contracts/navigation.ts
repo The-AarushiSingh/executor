@@ -8,7 +8,7 @@ export const ConnectionSearch = Schema.Struct({
   client: Schema.optionalKey(Schema.Literal("change")),
 });
 
-/** Direct links and refreshes retain a connection dialog on its app or account page. */
+/** Direct links and refreshes retain a connection dialog on its app page. */
 export function parseConnectionSearch(search: Record<string, unknown>): {
   readonly connection?: AccountConnectionId | undefined;
   readonly client?: "change" | undefined;
@@ -24,13 +24,10 @@ export function parseConnectionSearch(search: Record<string, unknown>): {
 }
 
 /** The account list marks a linked account, which has no page of its own. */
-export function parseAccountsSearch(search: Record<string, unknown>): ReturnType<
-  typeof parseConnectionSearch
-> & {
+export function parseAccountsSearch(search: Record<string, unknown>): {
   readonly account?: AccountId | undefined;
 } {
   return {
-    ...parseConnectionSearch(search),
     account: Option.getOrUndefined(Schema.decodeUnknownOption(AccountId)(search.account)),
   };
 }

@@ -907,16 +907,13 @@ export const makeOAuth = (
                 id: current.id,
                 owner: current.owner,
                 reconnectAccount: current.reconnectAccount,
-                target:
-                  current.target === null
-                    ? null
-                    : {
-                        app: current.target.app,
-                        profile: yield* storedProfile(tx, {
-                          app: current.target.app,
-                          profile: current.target.profile,
-                        }),
-                      },
+                target: {
+                  app: current.target.app,
+                  profile: yield* storedProfile(tx, {
+                    app: current.target.app,
+                    profile: current.target.profile,
+                  }),
+                },
               });
             yield* finishConnection(tx, claimed, saved);
             yield* saveClient(tx);
@@ -1384,16 +1381,13 @@ export const makeOAuth = (
               id: current.id,
               owner: current.owner,
               reconnectAccount: current.reconnectAccount,
-              target:
-                current.target === null
-                  ? null
-                  : {
-                      app: current.target.app,
-                      profile: yield* storedProfile(tx, {
-                        app: current.target.app,
-                        profile: current.target.profile,
-                      }),
-                    },
+              target: {
+                app: current.target.app,
+                profile: yield* storedProfile(tx, {
+                  app: current.target.app,
+                  profile: current.target.profile,
+                }),
+              },
             });
           yield* finishConnection(tx, current, saved);
           if (savedClient !== undefined)

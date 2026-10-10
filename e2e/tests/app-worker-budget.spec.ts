@@ -12,7 +12,7 @@ import { Api, body, type Session } from "../support/api.ts";
 import { HostedLive, TestLive, withCase, withHostedCase } from "../support/case.ts";
 import { Resource } from "../support/contracts.ts";
 import { Target } from "../support/platform.ts";
-import { createProfile, selectProfileAccounts } from "../support/profiles.ts";
+import { connectLocalAccount, createProfile } from "../support/profiles.ts";
 import { requestGate } from "../support/request-gate.ts";
 import { appsManifest, databaseFiles } from "../support/apps-release.ts";
 import { appWorkerBudgetLimit as limit, appWorkerIdleSeconds, scenarios } from "../test-plan.ts";
@@ -262,25 +262,21 @@ const localSelections = ({ apps, accountsPerApp, database }: Workload) =>
       );
       for (let account = 0; account < accountsPerApp; account++) {
         const token = `synthetic-budget-${index}-${account}`;
-        const created = yield* api.request(agent, "POST", "/v1/accounts", {
-          owner,
-          provider: app.requirements.accounts.service.provider,
-          method: "key",
-          label: name,
-          fields: { token },
-        });
-        expect(created.status, JSON.stringify(created.body)).toBe(200);
-        const id = (yield* body(Resource, created)).id;
-        accounts.push(id);
         const profile = yield* createProfile(agent, path, {
           owner,
           subject: "local",
         });
-        expect(
-          (yield* selectProfileAccounts(agent, path, profile.id, {
-            service: id,
-          })).status,
-        ).toBe(200);
+        // Connecting the account for the profile selects it there.
+        const connected = yield* connectLocalAccount(agent, {
+          owner,
+          app: app.id,
+          profile: profile.id,
+          requirement: "service",
+          method: "key",
+          label: name,
+          fields: { token },
+        });
+        accounts.push(connected.id);
         // Profile setup calls the selection's Worker in the background. Wait until it is done, so
         // its calls cannot change which Workers were used most recently while the scenario runs.
         const setup = yield* api.request(agent, "GET", `${path}/profiles/${profile.id}`).pipe(
