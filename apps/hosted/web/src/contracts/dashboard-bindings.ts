@@ -5,19 +5,10 @@ import { AsyncResult, Atom } from "effect/reactivity";
 import type { AppId } from "@executor-js/sdk";
 import type { OrganizationReference } from "@executor-js/hosted-server/organization";
 import { providerDisplayUrl, type InstallApp } from "@executor-js/ui/contracts/dashboard";
+import { blankAppFiles } from "@executor-js/ui/contracts/blank-app";
 import { HostedClient, catalogAtom } from "./api.ts";
 import { inventoryAtom } from "./organization.ts";
 import { acknowledgeApp, toolsAtom } from "./apps.ts";
-
-/** Minimal app the Add app "blank" path deploys; must include root index.ts. */
-const blankAppFiles = [
-  {
-    path: "index.ts",
-    content: `import { defineApp, router } from "apps";
-export default defineApp({ accounts: {} }, async () => ({ tools: router({}) }));
-`,
-  },
-] as const;
 
 /** A separate set of atom identities per organization prevents cross-organization cache reuse. */
 export const dashboardAtoms = Atom.family((organization: OrganizationReference) => ({
@@ -63,12 +54,20 @@ export const dashboardAtoms = Atom.family((organization: OrganizationReference) 
       client.apps.importCustom({ params: { organization }, payload: { source: input } }),
     ).pipe(Effect.tap((saved) => Effect.sync(() => acknowledgeApp(get, organization, saved)))),
   ),
+  /**
+   * Hosted `apps.deploy` creates the named app, builds it, and stores the working source.
+   * `package.json` pins the release `framework.release` reports, which the build requires.
+   */
   createBlank: HostedClient.runtime.fn((input: { name: string }, get) =>
-    Effect.flatMap(HostedClient, (client) =>
-      client.apps.deploy({
+    Effect.gen(function* () {
+      const client = yield* HostedClient;
+      const { version } = yield* client.framework.release({ params: { organization } });
+      const saved = yield* client.apps.deploy({
         params: { organization },
-        payload: { name: input.name, files: [...blankAppFiles] },
-      }),
-    ).pipe(Effect.tap((saved) => Effect.sync(() => acknowledgeApp(get, organization, saved)))),
+        payload: { name: input.name, files: blankAppFiles(input.name, version) },
+      });
+      yield* Effect.sync(() => acknowledgeApp(get, organization, saved));
+      return saved;
+    }),
   ),
 }));
