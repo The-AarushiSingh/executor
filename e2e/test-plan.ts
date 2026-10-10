@@ -596,6 +596,69 @@ export const scenarios = plan({
       cloud: na("Shared MCP search; covered on local"),
     },
   },
+  mcpExecuteConcurrency: {
+    fixtures: "actors",
+    file: "mcp-execute-concurrency.spec.ts",
+    title:
+      "Hosted MCP execute runs async jobs one at a time and in JavaScript's order, so concurrent updates are never lost and reactions run when Node runs them",
+    targets: {
+      "self-host": scheduled,
+      cloud: scheduled,
+      local: na("Local runs the same programs in localMcpExecuteConcurrency."),
+    },
+  },
+  localMcpExecuteConcurrency: {
+    file: "mcp-execute-concurrency.spec.ts",
+    title:
+      "Local MCP execute runs async jobs one at a time and in JavaScript's order, so concurrent updates are never lost and reactions run when Node runs them",
+    targets: {
+      local: scheduled,
+      "self-host": na("Hosted products run the same programs in mcpExecuteConcurrency."),
+      cloud: na("Hosted products run the same programs in mcpExecuteConcurrency."),
+    },
+  },
+  mcpExecuteRecursion: {
+    fixtures: "actors",
+    file: "mcp-execute-concurrency.spec.ts",
+    title:
+      "Hosted MCP execute fails runaway async recursion with the nesting-depth error instead of hanging, and still returns from a deep chain of async calls",
+    targets: {
+      "self-host": scheduled,
+      cloud: scheduled,
+      local: na("Local runs the same programs in localMcpExecuteRecursion."),
+    },
+  },
+  localMcpExecuteRecursion: {
+    file: "mcp-execute-concurrency.spec.ts",
+    title:
+      "Local MCP execute fails runaway async recursion with the nesting-depth error instead of hanging, and still returns from a deep chain of async calls",
+    targets: {
+      local: scheduled,
+      "self-host": na("Hosted products run the same programs in mcpExecuteRecursion."),
+      cloud: na("Hosted products run the same programs in mcpExecuteRecursion."),
+    },
+  },
+  mcpExecuteCallDepth: {
+    fixtures: "actors",
+    file: "mcp-execute-concurrency.spec.ts",
+    title:
+      "Hosted MCP execute leaves a generator usable after a step fails at the call depth limit, and returns from deep generator chains",
+    targets: {
+      "self-host": scheduled,
+      cloud: scheduled,
+      local: na("Local runs the same programs in localMcpExecuteCallDepth."),
+    },
+  },
+  localMcpExecuteCallDepth: {
+    file: "mcp-execute-concurrency.spec.ts",
+    title:
+      "Local MCP execute leaves a generator usable after a step fails at the call depth limit, and returns from deep generator chains",
+    targets: {
+      local: scheduled,
+      "self-host": na("Hosted products run the same programs in mcpExecuteCallDepth."),
+      cloud: na("Hosted products run the same programs in mcpExecuteCallDepth."),
+    },
+  },
   mcpExecuteReach: {
     fixtures: "actors",
     file: "mcp-execute-reach.spec.ts",
