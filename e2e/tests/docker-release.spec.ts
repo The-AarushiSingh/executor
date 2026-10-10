@@ -776,6 +776,28 @@ http.createServer((request, response) => {
               200,
             );
             yield* spansOf(afterRestart);
+            // The image runs Executor's workerd build pinned in workerd.json, configured to
+            // collect idle isolates, pace pressure collections and release TCMalloc memory. App
+            // Worker unloading stays with the runner's residency, and the bridges keep `gc`.
+            const pinFile = yield* (yield* Path.Path).fromFileUrl(
+              new URL("../../apps/hosted/self-host/workerd.json", import.meta.url),
+            );
+            const pin = yield* Schema.decodeUnknownEffect(
+              Schema.fromJsonString(Schema.Struct({ release: Schema.String })),
+            )(yield* (yield* FileSystem.FileSystem).readFileString(pinFile));
+            expect(
+              (yield* run(["exec", id, "cat", "/app/runtime-packages.txt"])).split("\n"),
+            ).toContain(`workerd@${pin.release}`);
+            const workerdConfig = yield* run(["exec", id, "cat", "/app/workerd.capnp"]);
+            for (const setting of [
+              "idleIsolateGcDelayMs=10000",
+              "pressureGcBudgetMs=100",
+              "tcmallocBackgroundReleaseBytesPerSecond=8388608",
+              "releaseMemoryAfterGc=true",
+              'v8Flags=["--expose-gc","--no-flush-liftoff-code"]',
+            ])
+              expect(workerdConfig).toContain(setting);
+            expect(workerdConfig).not.toContain("workerLoaderIdleTtlMs");
             expect(
               yield* processes.exitCode(
                 ChildProcess.make("docker", [
