@@ -1659,6 +1659,16 @@ export const makeOAuth = (
             );
             if (current?.status !== claim) return undefined;
             heldClaims.add(claim);
+            // How long a claim this renewal took over went unconfirmed tells a process that died
+            // from one whose confirmations stopped while it kept running. Only the caller that won
+            // the claim records it.
+            if (abandoned)
+              yield* Effect.annotateCurrentSpan(
+                "oauth.renewal.abandoned_claim_age_ms",
+                now - row.updatedAt.getTime(),
+              );
+            // Confirmations made and failed while this renewal held the claim, recorded on its span.
+            const beats = { confirmed: 0, failed: 0 };
             const heartbeat = yield* Effect.forkChild(
               Effect.sleep(renewalHeartbeat).pipe(
                 Effect.andThen(Clock.currentTimeMillis),
@@ -1670,8 +1680,23 @@ export const makeOAuth = (
                     }),
                   ),
                 ),
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    beats.confirmed++;
+                  }),
+                ),
                 // A failed confirmation is retried at the next beat; the lease spans several.
-                Effect.catch(() => Effect.void),
+                Effect.catch(() =>
+                  Effect.sync(() => {
+                    beats.failed++;
+                  }).pipe(
+                    Effect.andThen(
+                      Effect.logWarning("OAuth renewal could not confirm its claim").pipe(
+                        Effect.annotateLogs("oauth.provider.id", account.provider),
+                      ),
+                    ),
+                  ),
+                ),
                 Effect.forever,
                 Effect.interruptible,
               ),
@@ -1680,6 +1705,14 @@ export const makeOAuth = (
               Effect.ensuring(
                 Fiber.interrupt(heartbeat).pipe(
                   Effect.andThen(Effect.sync(() => heldClaims.delete(claim))),
+                  Effect.andThen(
+                    Effect.suspend(() =>
+                      Effect.annotateCurrentSpan({
+                        "oauth.renewal.heartbeats": beats.confirmed,
+                        "oauth.renewal.heartbeat_failures": beats.failed,
+                      }),
+                    ),
+                  ),
                 ),
               ),
             );

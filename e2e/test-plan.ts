@@ -2866,6 +2866,17 @@ export const scenarios = plan({
       local: na("Exercises the shared OAuth lifecycle through hosted APIs."),
     },
   },
+  oauthBackgroundRenewalAfterBatch: {
+    fixtures: "actors",
+    file: "oauth-background-renewal.spec.ts",
+    title:
+      "A skill catalog refreshed in the background after a dashboard batch read saves the OAuth token its renewal rotated",
+    targets: {
+      "self-host": scheduled,
+      cloud: managedCloud,
+      local: na("Exercises the shared OAuth lifecycle through hosted APIs."),
+    },
+  },
   appBuildFailureDetails: {
     fixtures: "actors",
     managementProfiles: ["owner"],
