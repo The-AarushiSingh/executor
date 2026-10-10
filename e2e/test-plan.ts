@@ -635,6 +635,17 @@ export const scenarios = plan({
       local: na("Hosted deployment API scenario"),
     },
   },
+  liveOpenapiAlternatives: {
+    fixtures: "actors",
+    file: "live-openapi-import.spec.ts",
+    title:
+      "Live OpenAPI ignores security alternatives naming undeclared schemes and sends only the met one's credentials",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Loopback upstream fixture"),
+      local: na("Hosted deployment API scenario"),
+    },
+  },
   liveOpenapi32: {
     fixtures: "actors",
     file: "live-openapi-import.spec.ts",
