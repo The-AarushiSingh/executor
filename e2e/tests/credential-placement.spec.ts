@@ -496,9 +496,11 @@ const harness = Effect.gen(function* () {
     });
   const call = <A>(path: string, output: Schema.Decoder<A>, tool: string, profile: string) =>
     Effect.gen(function* () {
+      // Every tool here only reads; naming the kind lets a refused call renew and repeat.
       const response = yield* api.request(actors.owner, "POST", `${path}/tools/call`, {
         profile,
         tool,
+        kind: "query",
         input: tool === "probe" ? { origin: "" } : {},
       });
       expect(response.status, JSON.stringify(response.body)).toBe(200);
@@ -1439,6 +1441,7 @@ layer(HostedLive, { excludeTestServices: true })("Credential placement", (it) =>
         const read = yield* api.request(actors.owner, "POST", `${scoped}/tools/call`, {
           profile: renewing.profile,
           tool: "resource",
+          kind: "query",
           input: {},
         });
         expect(read.status, JSON.stringify(read.body)).toBe(409);
