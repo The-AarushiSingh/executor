@@ -102,8 +102,9 @@ statement's rows, and leaves the product stopped. `serverControl("start")` then
 boots the current server over that state, as an upgrade would. Statement errors
 roll back the whole write.
 
-Use it only for legacy or upgrade-era data, and for reading rows that exist only
-in storage. Create everything else through the product, as usual. The boundary
+Use it only for legacy or upgrade-era data, for reading rows that exist only
+in storage, and for a storage fault no public surface can cause, such as a
+trigger that fails one owner's writes to one table. Create everything else through the product, as usual. The boundary
 check rejects any use outside a declared scenario. Only scenarios and the runner
 may import the module, and it is the only file allowed a database driver. The
 control route refuses undeclared scenarios at runtime. Self-host and Local

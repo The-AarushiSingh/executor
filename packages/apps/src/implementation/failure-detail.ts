@@ -38,7 +38,7 @@ export interface FailureDetail {
 const cacheMessages = {
   capacity: "A cache key, value or batch exceeded the app cache's size limits.",
   invalid: "The app made a cache request the app cache could not accept.",
-  unavailable: "The app cache is not available on this host.",
+  unavailable: "The app cache was not available for this operation.",
   storage: "The app cache failed to complete the operation.",
   timeout: "The app cache did not respond in time.",
 } satisfies Record<CacheError["reason"], string>;

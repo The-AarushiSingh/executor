@@ -1,20 +1,30 @@
 /** Failed and timed-out MCP executions report what happened instead of losing it. */
 import { expect, layer } from "@effect/vitest";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
-import { Clock, Effect, Layer, Ref, Schema } from "effect";
+import { Clock, Effect, Layer, Ref, Schedule, Schema } from "effect";
 import { HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { createServer } from "node:http";
+import { Socket } from "node:net";
 import { randomUUID } from "node:crypto";
 import { scenarios } from "../test-plan.ts";
 import { Api, body } from "../support/api.ts";
 import { Actors } from "../support/actors.ts";
 import { Browser } from "../support/browser.ts";
 import { App } from "../support/contracts.ts";
-import { Evidence } from "../support/evidence.ts";
+import { Evidence, Telemetry } from "../support/evidence.ts";
 import { HostedLive, withHostedCase } from "../support/case.ts";
 import { McpClient } from "../support/mcp-client.ts";
 import { requestGate } from "../support/request-gate.ts";
-import { appsManifest, withApps, mcpSdkVersion } from "../support/apps-release.ts";
+import { appsManifest, databaseFiles, withApps, mcpSdkVersion } from "../support/apps-release.ts";
+import {
+  expectNoRepeatAdvice,
+  expectUnknownOutcome,
+  readAdvice,
+  unknownOutcomeAction,
+} from "../support/write-outcome.ts";
+import { recordingService } from "../support/recording-service.ts";
+import { legacyStorage } from "../support/legacy-storage.ts";
+import { serverControl } from "../support/server-control.ts";
 
 // A refresh that runs until its 30 s background limit unless cancelled.
 const slowRefresh = `const slowRefresh = (signal) => new Promise((resolve) => {
@@ -100,9 +110,17 @@ const invalidArguments = "Invalid arguments for tool lookup: item is required";
 /**
  * Which requests the server answers with a JSON-RPC error: every request with HTTP 400, tool calls
  * with HTTP 400, the session a tool call opens with HTTP 400, or tool calls inside a successful
- * response. Only a tool call's session offers elicitation, so its initialize is told apart by that.
+ * response. `silent-calls` answers tool calls only after the app stopped waiting, and
+ * `dropped-calls` runs each tool call, then closes the connection without answering. Only a tool
+ * call's session offers elicitation, so its initialize is told apart by that.
  */
-type Refusal = "everything" | "tool-calls" | "call-sessions" | "tool-arguments";
+type Refusal =
+  | "everything"
+  | "tool-calls"
+  | "call-sessions"
+  | "tool-arguments"
+  | "silent-calls"
+  | "dropped-calls";
 
 /** The JSON-RPC fields this fixture reads. */
 const JsonRpcRequest = Schema.Struct({
@@ -111,6 +129,7 @@ const JsonRpcRequest = Schema.Struct({
   params: Schema.optional(
     Schema.Struct({
       protocolVersion: Schema.optional(Schema.String),
+      name: Schema.optional(Schema.String),
       capabilities: Schema.optional(
         Schema.Struct({ elicitation: Schema.optional(Schema.Unknown) }),
       ),
@@ -118,9 +137,14 @@ const JsonRpcRequest = Schema.Struct({
   ),
 });
 
-/** An MCP server with one `lookup` tool that refuses the requests `refuse` selects. */
+/**
+ * An MCP server that refuses the requests `refuse` selects. Its `lookup` tool may change data; its
+ * `peek` tool declares that it only reads.
+ */
 const refusingMcpServer = Effect.gen(function* () {
   const refuses = yield* Ref.make<Refusal>("everything");
+  const silentCalls = yield* Ref.make(0);
+  const droppedCalls = yield* Ref.make<ReadonlyArray<string>>([]);
   const answer = (id: string | number | null, body: object, status = 200) =>
     HttpServerResponse.json({ jsonrpc: "2.0", id, ...body }, { status });
   const refused = (id: string | number | null) =>
@@ -150,10 +174,30 @@ const refusingMcpServer = Effect.gen(function* () {
           result: {
             tools: [
               { name: "lookup", description: "Look up an item", inputSchema: { type: "object" } },
+              {
+                name: "peek",
+                description: "Read an item",
+                inputSchema: { type: "object" },
+                annotations: { readOnlyHint: true },
+              },
             ],
           },
         });
       case "tools/call":
+        if (refusing === "dropped-calls") {
+          // The server runs the call, then the connection closes before it answers.
+          yield* Ref.update(droppedCalls, (calls) => [...calls, message.params?.name ?? ""]);
+          const source = request.source;
+          if (!("socket" in source) || !(source.socket instanceof Socket))
+            return yield* Effect.die("The MCP fixture needs the Node request socket");
+          source.socket.destroy();
+          return HttpServerResponse.empty({ status: 500 });
+        }
+        if (refusing === "silent-calls") {
+          yield* Ref.update(silentCalls, (count) => count + 1);
+          // Long after the app stopped waiting, so the request still ends with the scenario.
+          yield* Effect.sleep("5 seconds");
+        }
         if (refusing === "tool-calls") return yield* refused(message.id);
         if (refusing === "tool-arguments")
           return yield* answer(message.id, {
@@ -179,11 +223,335 @@ const refusingMcpServer = Effect.gen(function* () {
   return {
     url: `http://127.0.0.1:${server.address.port}/mcp`,
     refuse: (requests: Refusal) => Ref.set(refuses, requests),
+    /** Tool calls the server received and never answered. */
+    silentCalls: Ref.get(silentCalls),
+    /** The tools the server ran before its connection closed, in order. */
+    droppedCalls: Ref.get(droppedCalls),
   };
 });
 
-/** An app whose only tools come from the MCP server at `url`. */
-const mcpAppFiles = (url: string) => [
+/** The URL of an MCP server that has stopped listening, so connecting to it is refused. */
+const closedMcpUrl = Effect.scoped(
+  Effect.gen(function* () {
+    const services = yield* Layer.build(
+      NodeHttpServer.layer(createServer, { host: "127.0.0.1", port: 0 }),
+    );
+    const server = yield* HttpServer.HttpServer.pipe(Effect.provideContext(services));
+    if (!("port" in server.address)) return yield* Effect.die("Fixture must listen on TCP");
+    return `http://127.0.0.1:${server.address.port}/mcp`;
+  }),
+);
+
+/**
+ * An app that saves records to the service at `url`. `save` starts saving a record and checks the
+ * service's quota at the same time; the quota check is refused with `status` while the record is
+ * still pending. `quota` only checks the quota, and `records` reads the saved records.
+ */
+const pendingWriteAppSource = (
+  url: string,
+) => `import { defineApp, mutation, query, object, string, router, ProviderError } from "apps";
+const service = ${JSON.stringify(url)};
+const refusal = (status) =>
+  new ProviderError(status === 401 ? { reason: "unauthorized", status } : { reason: "rate_limited", status });
+export default defineApp({ accounts: {} }, async () => ({
+  tools: router({
+    save: mutation({ input: object({ name: string(), status: string() }) }, async ({ fetch }, { name, status }) => {
+      const saving = fetch(service + "/records?pending", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }) });
+      const quota = await fetch(service + "/quota?after=write&status=" + status);
+      if (!quota.ok) {
+        saving.catch(() => undefined);
+        throw refusal(quota.status);
+      }
+      await saving;
+      return { saved: name };
+    }),
+    quota: query({ input: object({ status: string() }) }, async ({ fetch }, { status }) => {
+      const quota = await fetch(service + "/quota?status=" + status);
+      if (!quota.ok) throw refusal(quota.status);
+      return "available";
+    }),
+    records: query({ input: object({}) }, async ({ fetch }) => (await fetch(service + "/records")).json()),
+  }),
+}));`;
+
+/**
+ * An app whose `sync` saves a record to the service at `url`, then initializes a session with the
+ * MCP server at `mcp`, reporting a failure to reach it as Executor's MCP helpers do. `check` only
+ * initializes the session.
+ */
+const nestedMcpAppFiles = (url: string, mcp: string) => [
+  {
+    path: "package.json",
+    content: JSON.stringify({ dependencies: withApps({ "@modelcontextprotocol/sdk": "1.30.0" }) }),
+  },
+  {
+    path: "index.ts",
+    content: `import { defineApp, mutation, query, object, string, router } from "apps";
+import { McpError } from "apps/mcp";
+const service = ${JSON.stringify(url)};
+const mcp = ${JSON.stringify(mcp)};
+const initialize = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "record-sync", version: "1.0.0" } } };
+async function connect(fetch) {
+  const response = await fetch(mcp, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify(initialize) }).catch(() => {
+    throw new McpError({ phase: "transport", reason: "request" });
+  });
+  if (!response.ok) throw new McpError({ phase: "connect", reason: "request", status: response.status });
+}
+export default defineApp({ accounts: {} }, async () => ({
+  tools: router({
+    sync: mutation({ input: object({ name: string() }) }, async ({ fetch }, { name }) => {
+      await fetch(service + "/records", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }) });
+      await connect(fetch);
+      return { synced: name };
+    }),
+    check: query({ input: object({}) }, async ({ fetch }) => {
+      await connect(fetch);
+      return "reachable";
+    }),
+  }),
+}));`,
+  },
+];
+
+/**
+ * An app whose dynamic tools save a record named after the tool to the service at `url` while the
+ * app resolves them, as a factory that registers something does, and then fail before any handler
+ * runs. `configure` (a mutation) and `inspect` (a read) throw an error named like an invalid
+ * `mcpRouter` option, `warm` throws an unavailable app cache, and `send` throws an MCP failure
+ * saying its arguments could not be used. Listing the tools writes nothing.
+ */
+const resolveWritesAppSource = (
+  url: string,
+) => `import { defineApp, dynamicRouter, CacheError } from "apps";
+import { McpError } from "apps/mcp";
+const service = ${JSON.stringify(url)};
+class McpOptionsInvalid extends Error {
+  constructor() {
+    super("mcpRouter received an option it cannot use.");
+    this.name = "McpOptionsInvalid";
+    this.code = "invalid_option";
+  }
+}
+const tool = (name, readOnly) => ({ name, description: "Resolve " + name, inputSchema: { type: "object", properties: {} }, ...(readOnly ? { readOnly } : {}) });
+export default defineApp({ accounts: {} }, {
+  tools: dynamicRouter({
+    list: async () => [tool("configure"), tool("inspect", true), tool("warm"), tool("send")],
+    resolve: async (name) => {
+      await fetch(service + "/records", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }) });
+      if (name === "warm") throw new CacheError({ reason: "unavailable" });
+      if (name === "send") throw new McpError({ phase: "call", reason: "invalid_input" });
+      throw new McpOptionsInvalid();
+    },
+  }),
+});`;
+
+/**
+ * Tags a reply can carry that a guard reading the reply once took to mean the call failed before
+ * its handler ran, with the fields each needs to decode. Each reaches the caller as an
+ * `AppEvaluationFailed`.
+ */
+const forgedTags = {
+  HostEvaluationFailed: { source: "app", errorName: "Error", message: "SYNTHETIC_EVALUATION" },
+  SkillLoadFailed: { reason: "request", status: 503 },
+  HostRequestInvalid: {},
+  HostAccountsInvalid: {},
+} as const;
+
+/**
+ * Every error the call route reports once the app's code received the call, with its status and
+ * how a write provokes it: the error its reply is rewritten to, or none for an error the app
+ * throws (`ToolCallFailed`) and an approval its policy asks for (`ToolApprovalRequired`).
+ */
+const afterTheApp = {
+  ToolCallFailed: { status: 502 },
+  // A skill source that answered 404: its own advice, for a read, is to try again once fixed.
+  AppEvaluationFailed: {
+    status: 502,
+    reply: { _tag: "SkillLoadFailed", reason: "request", status: 404 },
+  },
+  AppProviderFailed: {
+    status: 502,
+    reply: { _tag: "ProviderError", reason: "unavailable", status: 503 },
+  },
+  ToolElicitationFailed: {
+    status: 422,
+    reply: { _tag: "ElicitationFailed", reason: "transaction" },
+  },
+  ToolNotFound: { status: 404, reply: { _tag: "HostToolNotFound" } },
+  ToolKindMismatch: {
+    status: 409,
+    reply: {
+      _tag: "HostKindMismatch",
+      tool: "ToolKindMismatch",
+      requested: "mutation",
+      actual: "query",
+    },
+  },
+  InputInvalid: {
+    status: 422,
+    reply: { _tag: "HostInputInvalid", problems: ["name: Expected string, got undefined"] },
+  },
+  ToolBlocked: { status: 403, reply: { _tag: "HostToolBlocked" } },
+  ToolApprovalRequired: { status: 409 },
+  ToolPolicyFailed: { status: 500, reply: { _tag: "HostToolPolicyFailed" } },
+} as const;
+
+/**
+ * The errors the call route declares that are reported before the host hands the call to the app's
+ * code, or only by a tool listing, so none records that a call may have written.
+ */
+const beforeTheApp = [
+  "RequestInvalid",
+  "Unauthorized",
+  "Forbidden",
+  "OrganizationForbidden",
+  "AuthenticationUnavailable",
+  "ProfileNotFound",
+  "ProfileConflict",
+  "AppNotFound",
+  "AppNotDeployed",
+  "DeploymentNotFound",
+  "AccountNotFound",
+  "AccountRequired",
+  "AccountSelectionInvalid",
+  "OAuthReconnectRequired",
+  "OAuthRenewalFailed",
+  "ToolListingTimedOut",
+];
+
+/**
+ * Executor's own failures, which the call route can report before the host hands the call to the
+ * app's code or after it, such as saving the approval request a write's policy asked for. After
+ * it, they record that the call may have written (`mcpExecuteApprovalSaveFailed`).
+ */
+const eitherSide = ["StorageError", "CredentialsError"];
+
+/** The reply each forging tool's failure is rewritten to. */
+const forgedReplies = {
+  ...Object.fromEntries(
+    Object.entries(forgedTags).map(([tag, fields]) => [tag, { _tag: tag, ...fields }]),
+  ),
+  ...Object.fromEntries(
+    Object.entries(afterTheApp).flatMap(([name, provoke]) =>
+      "reply" in provoke ? [[name, provoke.reply]] : [],
+    ),
+  ),
+  // A query refused for its kind: its caller keeps the advice to call it as a mutation.
+  readKind: { _tag: "HostKindMismatch", tool: "readKind", requested: "query", actual: "mutation" },
+};
+
+/**
+ * An app whose mutations each write a cache marker under their own name and then fail. The app's
+ * own code rewrites a forging tool's failure in its reply (`forgedReplies`); `ToolCallFailed`
+ * throws its error unchanged, and `ToolApprovalRequired`'s approval policy writes and then asks for
+ * approval. `marker` reads a marker back. Deployed with a database, its calls run in its data facet;
+ * without one, in its Worker.
+ */
+const writeFailuresAppSource = `import { defineApp, query, mutation, object, string, router } from "apps";
+const replies = ${JSON.stringify(forgedReplies)};
+const json = Response.prototype.json;
+Response.prototype.json = async function (this: Response) {
+  const reply = await json.call(this);
+  const message = reply?.error?.message;
+  const tool = typeof message === "string" && message.startsWith("FORGE:") ? message.slice(6) : undefined;
+  return tool === undefined ? reply : { ...reply, error: replies[tool] };
+} as typeof json;
+export default defineApp({ accounts: {} }, async (ctx) => {
+  const wrote = (tool: string) => ctx.cache.write([{ key: tool, value: "written" }], "1 minute");
+  const write = (tool: string) => mutation({ input: object({}) }, async () => {
+    await wrote(tool);
+    throw new Error(tool in replies ? "FORGE:" + tool : "SYNTHETIC_CALL");
+  });
+  return { tools: router({
+    ${[
+      ...Object.keys(forgedTags),
+      ...Object.keys(afterTheApp).filter((name) => name !== "ToolApprovalRequired"),
+    ]
+      .map((name) => `${name}: write(${JSON.stringify(name)}),`)
+      .join("\n    ")}
+    ToolApprovalRequired: mutation({ input: object({}), approval: async () => {
+      await wrote("ToolApprovalRequired");
+      return "user-approval" as const;
+    } }, async () => "ran"),
+    readKind: query({ input: object({}) }, async () => { throw new Error("FORGE:readKind"); }),
+    marker: query({ input: object({ tag: string() }) }, async (_, { tag }) => (await ctx.cache.read(tag, string())) ?? "missing"),
+  }) };
+});`;
+
+/** The OpenAPI document's error tags for one operation: each JSON error response's `_tag`s. */
+/**
+ * An app whose mutation's approval policy writes a cache marker and then asks for approval, so
+ * Executor saves an approval request after the app's code received the call. `marker` reads it.
+ */
+const approvalSaveAppSource = `import { defineApp, query, mutation, object, string, router } from "apps";
+export default defineApp({ accounts: {} }, async (ctx) => ({ tools: router({
+  guarded: mutation({ input: object({}), approval: async () => {
+    await ctx.cache.write([{ key: "guarded", value: "written" }], "1 minute");
+    return "user-approval" as const;
+  } }, async () => "ran"),
+  marker: query({ input: object({}) }, async () => (await ctx.cache.read("guarded", string())) ?? "missing"),
+}) }));`;
+
+/**
+ * An app whose factory saves a record each time it is evaluated. Its queries save a record and
+ * then fail with an unavailable cache (`check`), or have an approval policy that saves a record
+ * and then asks for approval (`approved`).
+ */
+const unnamedKindAppSource = (
+  url: string,
+) => `import { defineApp, query, object, router, CacheError } from "apps";
+const save = (name) => fetch(${JSON.stringify(`${url}/records`)}, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }) });
+export default defineApp({ accounts: {} }, async () => {
+  await save("factory");
+  return { tools: router({
+    check: query({ input: object({}) }, async () => {
+      await save("handler");
+      throw new CacheError({ reason: "unavailable" });
+    }),
+    approved: query({ input: object({}), approval: async () => {
+      await save("policy");
+      return "user-approval" as const;
+    } }, async () => "ran"),
+  }) };
+});`;
+
+const declaredErrors = (document: unknown, path: string, method: string) => {
+  const record = (value: unknown): Readonly<Record<string, unknown>> =>
+    typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+  const schemas = record(record(record(document).components).schemas);
+  const resolve = (value: unknown): Readonly<Record<string, unknown>> => {
+    const shape = record(value);
+    return typeof shape.$ref === "string"
+      ? resolve(schemas[shape.$ref.split("/").at(-1) ?? ""])
+      : shape;
+  };
+  const tags = (value: unknown): ReadonlyArray<readonly [string, ReadonlyArray<string>]> => {
+    const shape = resolve(value);
+    const alternatives = shape.anyOf ?? shape.oneOf;
+    if (Array.isArray(alternatives)) return alternatives.flatMap(tags);
+    const properties = record(shape.properties);
+    const tag = record(properties._tag);
+    const name = tag.const ?? (Array.isArray(tag.enum) ? tag.enum[0] : undefined);
+    return typeof name === "string" ? [[name, Object.keys(properties)]] : [];
+  };
+  const operation = record(record(record(record(document).paths)[path])[method]);
+  return Object.entries(record(operation.responses))
+    .filter(([status]) => Number(status) >= 400)
+    .flatMap(([, response]) =>
+      tags(record(record(record(response).content)["application/json"]).schema),
+    );
+};
+
+/** A REST failure's body: its code, message, any recovery, and whether it records a write. */
+const RestFailure = Schema.Struct({
+  _tag: Schema.String,
+  message: Schema.String,
+  mayHaveWritten: Schema.optional(Schema.Boolean),
+  recovery: Schema.optional(Schema.Struct({ action: Schema.String, instructions: Schema.String })),
+});
+
+/** An app whose only tools come from the MCP server at `url`, waiting `timeoutMs` for each call. */
+const mcpAppFiles = (url: string, timeoutMs?: number) => [
   {
     path: "package.json",
     content: JSON.stringify({
@@ -194,9 +562,24 @@ const mcpAppFiles = (url: string) => [
     path: "index.ts",
     content: `import { defineApp } from "apps";
 import { mcpRouter } from "apps/mcp";
-export default defineApp({ accounts: {} }, async () => ({ tools: await mcpRouter({ url: ${JSON.stringify(url)} }) }));`,
+export default defineApp({ accounts: {} }, async () => ({ tools: await mcpRouter({ url: ${JSON.stringify(url)}${timeoutMs === undefined ? "" : `, timeoutMs: ${timeoutMs}`} }) }));`,
   },
 ];
+
+/** A program that failed on a tool's error, with the agent-facing explanation and retry policy. */
+const ToolFailed = Schema.Struct({
+  execution: Schema.Struct({
+    ok: Schema.Literal(false),
+    error: Schema.Struct({
+      message: Schema.String,
+      response: Schema.Struct({
+        code: Schema.String,
+        retryable: Schema.Boolean,
+        recovery: Schema.Struct({ action: Schema.String, instructions: Schema.String }),
+      }),
+    }),
+  }),
+});
 
 /** The safe JSON projection MCP puts in an unavailable app's reason. */
 const Diagnostic = Schema.fromJsonString(
@@ -415,7 +798,7 @@ const hostedAppFiles = (
       name: `${name} ${randomUUID().slice(0, 8)}`,
       files,
     });
-    expect(deployed.status).toBe(200);
+    expect(deployed.status, JSON.stringify(deployed.body)).toBe(200);
     const app = yield* body(App, deployed);
     yield* Effect.addFinalizer(() =>
       Effect.gen(function* () {
@@ -619,8 +1002,23 @@ layer(HostedLive, { excludeTestServices: true })("Hosted MCP execute failures", 
           .execution;
         // The problem names the keys the object takes; the supplied text is not echoed.
         expect(error.message).toBe(
-          "InputInvalid (HTTP 422): Input failed validation: input.query: Expected object {text, limit?} Recovery: Change the input to the shape each problem expects, then call the tool again.",
+          "InputInvalid (HTTP 422): Input failed validation: input.query: Expected object {text, limit?} Recovery: Change the input to the shape each problem expects, then call the tool again. Retryable (unchanged call): no.",
         );
+        // `retryable: false` is about the unchanged call: a program that corrects the input makes
+        // a new call, which runs.
+        const corrected = yield* executeOnce(
+          client,
+          "Correct the input after a validation error that is not retryable, then call again",
+          `const find = tools[${JSON.stringify(slug)}].find;
+try { return await find({query: "fixture text"}); } catch (error) {
+  const { retryable } = JSON.parse(error.message);
+  return { retryable, value: await find({query: {text: "fixture text"}}) };
+}`,
+          "input-shape-corrected-result.json",
+        );
+        expect(
+          (yield* Schema.decodeUnknownEffect(Completed)(corrected.structured)).execution.value,
+        ).toEqual({ retryable: false, value: "fixture text" });
         const optional = yield* executeOnce(
           client,
           "Pass the filter text in place of the optional filter object",
@@ -631,7 +1029,7 @@ layer(HostedLive, { excludeTestServices: true })("Hosted MCP execute failures", 
         expect(
           (yield* Schema.decodeUnknownEffect(Failed)(optional.structured)).execution.error.message,
         ).toBe(
-          "InputInvalid (HTTP 422): Input failed validation: input.filter: Expected object {tag} Recovery: Change the input to the shape each problem expects, then call the tool again.",
+          "InputInvalid (HTTP 422): Input failed validation: input.filter: Expected object {tag} Recovery: Change the input to the shape each problem expects, then call the tool again. Retryable (unchanged call): no.",
         );
         const nested = yield* executeOnce(
           client,
@@ -643,7 +1041,7 @@ layer(HostedLive, { excludeTestServices: true })("Hosted MCP execute failures", 
         expect(
           (yield* Schema.decodeUnknownEffect(Failed)(nested.structured)).execution.error.message,
         ).toBe(
-          "InputInvalid (HTTP 422): Input failed validation: input.child: Expected object {child?, name, ...} or object {child?, id, ...}. Closest is alternative 1, whose problems follow; input.child.name: Missing key Recovery: Change the input to the shape each problem expects, then call the tool again.",
+          "InputInvalid (HTTP 422): Input failed validation: input.child: Expected object {child?, name, ...} or object {child?, id, ...}. Closest is alternative 1, whose problems follow; input.child.name: Missing key Recovery: Change the input to the shape each problem expects, then call the tool again. Retryable (unchanged call): no.",
         );
         // Fixed values are listed, as the signature shows them: a literal quoted, and an enum up
         // to ten values before the rest are counted. Each call fails on its one wrong field.
@@ -753,10 +1151,11 @@ return messages;`,
           "tool-blocked-result.json",
         );
         const { error } = (yield* Schema.decodeUnknownEffect(Failed)(blocked.structured)).execution;
-        // The agent learns that the app's own policy refused the call and not to repeat it
-        // unchanged, not only the error's name.
+        // The agent learns that the app's own policy refused the call and not to repeat it, not
+        // only the error's name. The policy is the app's code and ran after the app received the
+        // mutation, so the refusal does not show that nothing changed.
         expect(error.message).toBe(
-          "ToolBlocked (HTTP 403): The approval policy in the app’s code denied this call to “remove”. Recovery: Check what the app’s approval policy requires for this tool. If the call should be allowed, meet those requirements or, with the user’s agreement, change the policy and deploy it. Otherwise use a different tool.",
+          `ToolBlocked (HTTP 403): The approval policy in the app’s code denied this call to “remove”. Recovery: ${unknownOutcomeAction} Retryable (unchanged call): no.`,
         );
         expect(error.response).toEqual({ code: "ToolBlocked", status: 403 });
         const caught = yield* executeOnce(
@@ -770,6 +1169,10 @@ return messages;`,
           completed.execution.value,
         );
         expect(recovery.code).toBe("ToolBlocked");
+        expect(recovery.recovery.action).toBe(unknownOutcomeAction);
+        expect(recovery.recovery.instructions).toContain(
+          "For a call that only reads, the advice for this failure is: “Check what the app’s approval policy requires for this tool.",
+        );
         expect(recovery.recovery.instructions).toContain("Do not retry the call unchanged.");
         expect(recovery.recovery.instructions).toContain("Read the policy to see what it checks");
         expect(recovery.recovery.instructions).toContain("user-approval");
@@ -800,7 +1203,7 @@ return messages;`,
               ),
           ),
         ).toBe(
-          "The approval policy in the app’s code denied this call to “remove”. Check what the app’s approval policy requires for this tool. If the call should be allowed, meet those requirements or, with the user’s agreement, change the policy and deploy it. Otherwise use a different tool.",
+          `The approval policy in the app’s code denied this call to “remove”. ${unknownOutcomeAction}`,
         );
         yield* browser.checkpoint("Denied tool call in the dashboard");
       }).pipe(Effect.provide(McpClient.layer)),
@@ -971,6 +1374,835 @@ export default defineApp({ accounts: {} }, async () => ({ tools: await mcpRouter
         expect(sessionRefused).toContain("refused the request while connecting (HTTP 400)");
         expect(sessionRefused).toContain(refused);
         expect(sessionRefused).not.toContain("The app threw");
+      }).pipe(Effect.provide(McpClient.layer)),
+    ),
+  );
+  it.effect(scenarios.mcpExecuteCallTimedOut.title, (context) =>
+    withHostedCase(
+      context,
+      Effect.gen(function* () {
+        const api = yield* Api,
+          actors = yield* Actors;
+        const server = yield* refusingMcpServer;
+        // The server lists its tools, then never answers a call; the app waits one second for it.
+        yield* server.refuse("silent-calls");
+        const app = yield* hostedAppFiles("Silent MCP call", mcpAppFiles(server.url, 1_000));
+
+        // The API names the timed-out call and says the server may still finish it. The tool may
+        // change data, so the agent is told not to repeat it at all.
+        const called = yield* api.request(actors.owner, "POST", `${app.path}/tools/call`, {
+          tool: "lookup",
+          input: {},
+        });
+        expect(called.status, JSON.stringify(called.body)).toBe(502);
+        expect(called.body).toMatchObject({
+          _tag: "ToolCallFailed",
+          mcp: { phase: "call", reason: "timeout" },
+          mayHaveWritten: true,
+          message: expect.stringContaining("did not answer the tool call in time"),
+        });
+        // The read's one more attempt is not offered for a call that may have written.
+        const timedOut = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({
+            recovery: Schema.Struct({ action: Schema.String, instructions: Schema.String }),
+          }),
+        )(called.body);
+        expectUnknownOutcome(
+          timedOut.recovery,
+          "For a call that only reads, the advice for this failure is: “You may retry once.",
+        );
+        expect(JSON.stringify(called.body)).not.toContain("keep timing out");
+
+        // An agent's program receives the same explanation with its retry policy, and can read
+        // it from a caught error to stop instead of calling again.
+        const executed = yield* executeOnce(
+          app.client,
+          "Call a tool whose MCP server never answers",
+          `return await tools[${JSON.stringify(app.slug)}].lookup({});`,
+          "silent-call.json",
+        );
+        const { message, response } = (yield* Schema.decodeUnknownEffect(ToolFailed)(
+          executed.structured,
+        )).execution.error;
+        expect(message).toBe(
+          `ToolCallFailed (HTTP 502): The app’s MCP server did not answer the tool call in time, so Executor stopped waiting. The server may still finish it. Recovery: ${unknownOutcomeAction} Retryable (unchanged call): no.`,
+        );
+        expect(message).not.toContain("The app threw");
+        expect(response).toMatchObject({ code: "ToolCallFailed", retryable: false });
+        expectUnknownOutcome(response.recovery, "Do not expose credentials.");
+        const caught = yield* executeOnce(
+          app.client,
+          "Read the retry policy from a caught tool error",
+          `try { await tools[${JSON.stringify(app.slug)}].lookup({}); return "answered"; } catch (error) { return JSON.parse(error.message).retryable; }`,
+          "silent-call-caught.json",
+        );
+        expect(caught.structured).toMatchObject({ execution: { ok: true, value: false } });
+
+        // A tool that only reads cannot repeat a change, so one more attempt is offered, and the
+        // retry flag says so too.
+        const peeked = yield* executeOnce(
+          app.client,
+          "Call a read-only tool whose MCP server never answers",
+          `return await tools[${JSON.stringify(app.slug)}].peek({});`,
+          "silent-read.json",
+        );
+        const read = (yield* Schema.decodeUnknownEffect(ToolFailed)(peeked.structured)).execution
+          .error;
+        expect(read.response).toMatchObject({
+          code: "ToolCallFailed",
+          retryable: true,
+          recovery: {
+            action: "You may retry once. If it times out again, investigate before repeating it.",
+            instructions:
+              "The server may still complete the first attempt. For a read, you may retry once; if it times out again, check the server’s status before repeating it. Reduce the input only if that still meets the task. Do not expose credentials.",
+          },
+        });
+        expect(read.message).toMatch(/ Retryable \(unchanged call\): yes\.$/);
+        // A program can follow the flag: it repeats the read once, unchanged, and stops there.
+        const retried = yield* executeOnce(
+          app.client,
+          "Repeat a timed-out read once when its error says it is retryable",
+          `const call = () => tools[${JSON.stringify(app.slug)}].peek({});
+let retries = 0;
+try { return await call(); } catch (error) {
+  if (!JSON.parse(error.message).retryable) throw error;
+  retries += 1;
+  try { return await call(); } catch (again) { return { retries, retryable: JSON.parse(again.message).retryable }; }
+}`,
+          "silent-read-retried.json",
+        );
+        expect(retried.structured).toMatchObject({
+          execution: { ok: true, value: { retries: 1, retryable: true } },
+        });
+        // Every call reached the server once; Executor repeated none of them, and the program's
+        // own retry is the one extra read.
+        expect(yield* server.silentCalls).toBe(6);
+      }).pipe(Effect.provide(McpClient.layer)),
+    ),
+  );
+  it.effect(scenarios.mcpExecuteCallDropped.title, (context) =>
+    withHostedCase(
+      context,
+      Effect.gen(function* () {
+        const api = yield* Api,
+          actors = yield* Actors;
+        const server = yield* refusingMcpServer;
+        // The server runs each call, then its connection closes before it answers.
+        yield* server.refuse("dropped-calls");
+        const app = yield* hostedAppFiles("Dropped MCP call", mcpAppFiles(server.url));
+
+        // The call may have changed data and its outcome is unknown, so the agent is told not to
+        // repeat it.
+        const called = yield* api.request(actors.owner, "POST", `${app.path}/tools/call`, {
+          tool: "lookup",
+          input: {},
+        });
+        expect(called.status, JSON.stringify(called.body)).toBe(502);
+        expect(called.body).toMatchObject({
+          _tag: "ToolCallFailed",
+          mcp: { phase: "call", reason: "request" },
+          mayHaveWritten: true,
+          message:
+            "The request to the app’s MCP server failed before the server answered the tool call, so Executor cannot tell whether the server ran it.",
+          recovery: { action: unknownOutcomeAction },
+        });
+        expect(called.body).not.toHaveProperty("mcp.status");
+        expect(called.body).not.toHaveProperty("mcp.upstream");
+
+        const executed = yield* executeOnce(
+          app.client,
+          "Call a tool whose MCP server closes the connection after running it",
+          `return await tools[${JSON.stringify(app.slug)}].lookup({});`,
+          "dropped-call.json",
+        );
+        const write = (yield* Schema.decodeUnknownEffect(ToolFailed)(executed.structured)).execution
+          .error;
+        expect(write.response).toMatchObject({ code: "ToolCallFailed", retryable: false });
+        expectUnknownOutcome(
+          write.response.recovery,
+          "For a call that only reads, the advice for this failure is: “Retry at most once.",
+        );
+        expect(write.message).toBe(
+          `ToolCallFailed (HTTP 502): The request to the app’s MCP server failed before the server answered the tool call, so Executor cannot tell whether the server ran it. Recovery: ${unknownOutcomeAction} Retryable (unchanged call): no.`,
+        );
+        expect(write.message).not.toContain("Try again");
+
+        // The same failure of a read can be repeated: it cannot repeat a change.
+        const peeked = yield* executeOnce(
+          app.client,
+          "Call a read-only tool whose MCP server closes the connection after running it",
+          `return await tools[${JSON.stringify(app.slug)}].peek({});`,
+          "dropped-read.json",
+        );
+        const read = (yield* Schema.decodeUnknownEffect(ToolFailed)(peeked.structured)).execution
+          .error;
+        expect(read.response).toMatchObject({
+          code: "ToolCallFailed",
+          retryable: true,
+          recovery: {
+            action:
+              "Retry at most once. If it fails again, check the server’s status and connection.",
+          },
+        });
+        expect(read.message).toMatch(/ Retryable \(unchanged call\): yes\.$/);
+        // The server ran every call exactly once: Executor repeated none of them.
+        expect(yield* server.droppedCalls).toEqual(["lookup", "lookup", "peek"]);
+      }).pipe(Effect.provide(McpClient.layer)),
+    ),
+  );
+  it.effect(scenarios.mcpExecutePendingWriteRefused.title, (context) =>
+    withHostedCase(
+      context,
+      Effect.gen(function* () {
+        const api = yield* Api,
+          actors = yield* Actors;
+        const service = yield* recordingService;
+        const app = yield* hostedApp("Pending write", pendingWriteAppSource(service.url));
+        const tools = `tools[${JSON.stringify(app.slug)}]`;
+        const read = (label: string, file: string) =>
+          executeOnce(app.client, label, `return await ${tools}.records({});`, file).pipe(
+            Effect.flatMap(({ structured }) =>
+              Schema.decodeUnknownEffect(
+                Schema.Struct({
+                  execution: Schema.Struct({
+                    ok: Schema.Literal(true),
+                    value: Schema.Struct({ records: Schema.Array(Schema.String) }),
+                  }),
+                }),
+              )(structured),
+            ),
+            Effect.map(({ execution }) => execution.value.records),
+          );
+        for (const [status, name] of [
+          ["401", "first"],
+          ["429", "second"],
+        ] as const) {
+          // The service accepts the record to save later, then refuses the call's quota check at
+          // once. The refused request did not run, but the call's change is still pending.
+          const executed = yield* executeOnce(
+            app.client,
+            `Save a record while the service refuses another request with HTTP ${status}`,
+            `return await ${tools}.save({ name: ${JSON.stringify(name)}, status: ${JSON.stringify(status)} });`,
+            `pending-write-${status}.json`,
+          );
+          const { message, response } = (yield* Schema.decodeUnknownEffect(ToolFailed)(
+            executed.structured,
+          )).execution.error;
+          expect(response).toMatchObject({ code: "AppProviderFailed", retryable: false });
+          expectUnknownOutcome(response.recovery);
+          expect(message).toContain(`(HTTP ${status}) while calling a tool.`);
+          expect(
+            message.endsWith(` Recovery: ${unknownOutcomeAction} Retryable (unchanged call): no.`),
+          ).toBe(true);
+          // A read right after the failure shows nothing saved, yet the change still lands.
+          expect(
+            yield* read(
+              "Read the records right after the failure",
+              `pending-write-${status}-read.json`,
+            ),
+          ).not.toContain(name);
+          yield* service.commit;
+          expect(
+            yield* read(
+              "Read the records once the service saved them",
+              `pending-write-${status}-later.json`,
+            ),
+          ).toContain(name);
+        }
+
+        // The HTTP API records that the call may have written.
+        const called = yield* api.request(actors.owner, "POST", `${app.path}/tools/call`, {
+          tool: "save",
+          input: { name: "third", status: "429" },
+        });
+        expect(called.status, JSON.stringify(called.body)).toBe(502);
+        expect(called.body).toMatchObject({
+          _tag: "AppProviderFailed",
+          reason: "rate_limited",
+          status: 429,
+          mayHaveWritten: true,
+          recovery: { action: unknownOutcomeAction },
+        });
+        yield* service.commit;
+
+        // The same refusal of a read changed nothing, so it keeps its own retry advice.
+        const limited = yield* executeOnce(
+          app.client,
+          "Check the quota while the service refuses with HTTP 429",
+          `return await ${tools}.quota({ status: "429" });`,
+          "pending-write-read-limited.json",
+        );
+        const read429 = (yield* Schema.decodeUnknownEffect(ToolFailed)(limited.structured))
+          .execution.error;
+        expect(read429.response).toMatchObject({
+          code: "AppProviderFailed",
+          retryable: true,
+          recovery: { action: "Wait for the service’s rate limit to reset before trying again." },
+        });
+        // Each call ran once: Executor repeated none of them.
+        expect(yield* service.saved).toEqual(["first", "second", "third"]);
+      }).pipe(Effect.provide(McpClient.layer)),
+    ),
+  );
+  it.effect(scenarios.mcpExecuteNestedMcpAfterWrite.title, (context) =>
+    withHostedCase(
+      context,
+      Effect.gen(function* () {
+        const api = yield* Api,
+          actors = yield* Actors;
+        const service = yield* recordingService;
+        const app = yield* hostedAppFiles(
+          "Nested MCP after write",
+          nestedMcpAppFiles(service.url, yield* closedMcpUrl),
+        );
+        const tools = `tools[${JSON.stringify(app.slug)}]`;
+        const unreachable =
+          "Executor’s request to the app’s MCP server failed before the server answered, while connecting.";
+
+        // The tool saves a record, then cannot reach the MCP server it syncs with. The failure
+        // is the same as one while loading the app's tools, but the tool has already written.
+        const called = yield* api.request(actors.owner, "POST", `${app.path}/tools/call`, {
+          tool: "sync",
+          input: { name: "first" },
+        });
+        expect(called.status, JSON.stringify(called.body)).toBe(502);
+        expect(called.body).toMatchObject({
+          _tag: "AppEvaluationFailed",
+          mcp: { phase: "transport", reason: "request" },
+          mayHaveWritten: true,
+          message: unreachable,
+          recovery: { action: unknownOutcomeAction },
+        });
+        const executed = yield* executeOnce(
+          app.client,
+          "Call a tool that writes and then cannot reach its MCP server",
+          `return await ${tools}.sync({ name: "second" });`,
+          "nested-mcp-after-write.json",
+        );
+        const write = (yield* Schema.decodeUnknownEffect(ToolFailed)(executed.structured)).execution
+          .error;
+        expect(write.response).toMatchObject({ code: "AppEvaluationFailed", retryable: false });
+        expectUnknownOutcome(
+          write.response.recovery,
+          readAdvice(
+            "Try again. If this continues, check the MCP server’s address and status. Use the reported phase and error to identify the failure. Check the server URL, transport or access settings only when relevant. Do not expose credentials.",
+          ),
+        );
+        expect(write.message).toBe(
+          `AppEvaluationFailed (HTTP 502): ${unreachable} Recovery: ${unknownOutcomeAction} Retryable (unchanged call): no.`,
+        );
+        // Both calls saved their record before the MCP connection failed.
+        expect(yield* service.saved).toEqual(["first", "second"]);
+
+        // The same failure in a read changed nothing, so it may be repeated.
+        const checked = yield* executeOnce(
+          app.client,
+          "Call a read that cannot reach its MCP server",
+          `return await ${tools}.check({});`,
+          "nested-mcp-read.json",
+        );
+        const read = (yield* Schema.decodeUnknownEffect(ToolFailed)(checked.structured)).execution
+          .error;
+        expect(read.response).toMatchObject({
+          code: "AppEvaluationFailed",
+          retryable: true,
+          recovery: {
+            action: "Try again. If this continues, check the MCP server’s address and status.",
+          },
+        });
+      }).pipe(Effect.provide(McpClient.layer)),
+    ),
+  );
+
+  it.effect(scenarios.mcpExecuteResolveWrote.title, (context) =>
+    withHostedCase(
+      context,
+      Effect.gen(function* () {
+        const api = yield* Api,
+          actors = yield* Actors;
+        const service = yield* recordingService;
+        const app = yield* hostedApp("Resolve wrote", resolveWritesAppSource(service.url));
+        const tools = `tools[${JSON.stringify(app.slug)}]`;
+        const optionsFailure =
+          "Executor could not load this app’s tool definitions. The app threw McpOptionsInvalid (invalid_option): mcpRouter received an option it cannot use.";
+        const failedTool = (code: string, label: string, file: string) =>
+          executeOnce(app.client, label, `return await ${tools}.${code};`, file).pipe(
+            Effect.flatMap((executed) =>
+              Schema.decodeUnknownEffect(ToolFailed)(executed.structured),
+            ),
+            Effect.map(({ execution }) => execution.error),
+          );
+
+        // The app saved a record while resolving the mutation, then threw an error named like a
+        // configuration failure. Its name and fields come from the app, so the call's outcome is
+        // unknown and it is not offered as a retry.
+        const called = yield* api.request(actors.owner, "POST", `${app.path}/tools/call`, {
+          tool: "configure",
+          kind: "mutation",
+          input: {},
+        });
+        expect(called.status, JSON.stringify(called.body)).toBe(502);
+        expect(called.body).toMatchObject({
+          _tag: "AppEvaluationFailed",
+          failure: { errorName: "McpOptionsInvalid", code: "invalid_option" },
+          mayHaveWritten: true,
+          message: optionsFailure,
+          recovery: { action: unknownOutcomeAction },
+        });
+        expect(yield* service.saved).toEqual(["configure"]);
+
+        const configure = yield* failedTool(
+          "configure({})",
+          "Call a mutation whose app wrote and then reported invalid options",
+          "resolve-wrote-mutation.json",
+        );
+        expect(configure.response).toMatchObject({
+          code: "AppEvaluationFailed",
+          retryable: false,
+        });
+        expectUnknownOutcome(configure.response.recovery);
+        expect(configure.response.recovery.instructions).toContain(
+          "For a call that only reads, the advice for this failure is: “Try again. If this continues, investigate this error and fix its cause.",
+        );
+        expect(configure.message).toBe(
+          `AppEvaluationFailed (HTTP 502): ${optionsFailure} Recovery: ${unknownOutcomeAction} Retryable (unchanged call): no.`,
+        );
+        // One record for each call: the agent was not told to repeat either.
+        expect(yield* service.saved).toEqual(["configure", "configure"]);
+
+        // An unavailable app cache while resolving a write is outcome unknown too.
+        const warm = yield* failedTool(
+          "warm({})",
+          "Call a mutation whose app wrote and then reported an unavailable cache",
+          "resolve-wrote-cache.json",
+        );
+        expect(warm.response).toMatchObject({ code: "AppEvaluationFailed", retryable: false });
+        expectUnknownOutcome(warm.response.recovery);
+        expect(warm.message).toContain("Retryable (unchanged call): no.");
+        expect(yield* service.saved).toEqual(["configure", "configure", "warm"]);
+
+        // The app reports that the arguments could not be used; for a write that may have run,
+        // the copy does not claim that anything was not sent.
+        const send = yield* failedTool(
+          "send({})",
+          "Call a mutation whose app wrote and then reported unusable MCP arguments",
+          "resolve-wrote-mcp.json",
+        );
+        expect(send.response).toMatchObject({ code: "ToolCallFailed", retryable: false });
+        expectUnknownOutcome(send.response.recovery);
+        expect(send.message).toContain(
+          "The app reported that it could not use the input as the MCP tool’s arguments.",
+        );
+        expect(send.message).not.toMatch(/not (be )?sent/i);
+        expect(send.response.recovery.instructions).not.toMatch(/not (be )?sent/i);
+        expect(yield* service.saved).toEqual(["configure", "configure", "warm", "send"]);
+
+        // The same failure in a read keeps its advice to try again.
+        const inspect = yield* failedTool(
+          "inspect({})",
+          "Call a read whose app reported invalid options",
+          "resolve-read.json",
+        );
+        expect(inspect.response).toMatchObject({
+          code: "AppEvaluationFailed",
+          retryable: true,
+          recovery: {
+            action: "Try again. If this continues, investigate this error and fix its cause.",
+          },
+        });
+        expect(inspect.message).toContain("Retryable (unchanged call): yes.");
+      }).pipe(Effect.provide(McpClient.layer)),
+    ),
+  );
+
+  it.effect(scenarios.mcpExecuteWriteFailureSurfaces.title, (context) =>
+    withHostedCase(
+      context,
+      Effect.gen(function* () {
+        const api = yield* Api,
+          actors = yield* Actors,
+          evidence = yield* Evidence,
+          telemetry = yield* Telemetry,
+          browser = yield* Browser;
+        // Every error the call route declares is either one a write reports after its app code
+        // received the call, checked below on every surface, or one reported before it. A new
+        // error fails here until it is classified.
+        const document = yield* api.request(yield* api.session(), "GET", "/openapi.json");
+        expect(document.status).toBe(200);
+        const fields = new Map(
+          declaredErrors(
+            document.body,
+            "/api/organizations/{organization}/apps/{app}/tools/call",
+            "post",
+          ),
+        );
+        const declared = new Set(fields.keys());
+        yield* evidence.json("call-route-errors.json", [...declared].sort());
+        expect(
+          [...declared].filter(
+            (tag) =>
+              !(tag in afterTheApp) && !beforeTheApp.includes(tag) && !eitherSide.includes(tag),
+          ),
+        ).toEqual([]);
+        const afterIt = [...Object.keys(afterTheApp), ...eitherSide];
+        expect(afterIt.filter((tag) => !declared.has(tag))).toEqual([]);
+        // Every error a call can report after the hand-off can record the write.
+        expect(afterIt.filter((tag) => !fields.get(tag)?.includes("mayHaveWritten"))).toEqual([]);
+
+        /** Every message a request's trace recorded, once its tool call span was delivered. */
+        const recorded = (trace: string) =>
+          Effect.gen(function* () {
+            const spans = (yield* telemetry.query(trace)).data;
+            if (!spans.some(({ span }) => span.operationName === "sdk.tools.call"))
+              return yield* Effect.fail(new Error(`The trace ${trace} has not been delivered`));
+            return spans.flatMap(({ span }) => [
+              ...span.events.flatMap(({ name, attributes }) =>
+                name === "exception" ? [`${attributes["exception.message"]}`] : [],
+              ),
+              ...(span.statusMessage === undefined ? [] : [span.statusMessage]),
+            ]);
+          }).pipe(Effect.retry({ schedule: Schedule.spaced("500 millis"), times: 60 }));
+
+        for (const [mode, database] of [
+          ["worker", false],
+          ["facet", true],
+        ] as const) {
+          const app = yield* hostedAppFiles(`Write failures ${mode}`, [
+            { path: "index.ts", content: writeFailuresAppSource },
+            appsManifest,
+            ...databaseFiles(database),
+          ]);
+          const tools = `tools[${JSON.stringify(app.slug)}]`;
+          const call = (tool: string, kind: "query" | "mutation", input: object = {}) =>
+            api.request(actors.owner, "POST", `${app.path}/tools/call`, { tool, kind, input });
+          const marker = (tag: string) =>
+            call("marker", "query", { tag }).pipe(Effect.map((read) => read.body));
+          const cases = [
+            ...Object.entries(afterTheApp).map(([tool, { status }]) => ({
+              tool,
+              code: tool,
+              status,
+            })),
+            ...Object.keys(forgedTags).map((tool) => ({
+              tool,
+              code: "AppEvaluationFailed",
+              status: 502,
+            })),
+          ];
+          for (const { tool, code, status } of cases) {
+            const label = `${mode} ${tool}`;
+            // REST: the error keeps its code and status, records the write, and leads with the
+            // instruction not to repeat the call.
+            const rest = yield* call(tool, "mutation");
+            const trace = (yield* evidence.requests).at(-1)?.traceId;
+            expect(rest.status, JSON.stringify(rest.body)).toBe(status);
+            const failure = yield* Schema.decodeUnknownEffect(RestFailure)(rest.body);
+            expect(failure, label).toMatchObject({ _tag: code, mayHaveWritten: true });
+            if (failure.recovery === undefined)
+              expect(failure.message.startsWith(`${unknownOutcomeAction} `), label).toBe(true);
+            else expectUnknownOutcome(failure.recovery);
+            for (const text of [
+              failure.message,
+              failure.recovery?.action ?? "",
+              failure.recovery?.instructions ?? "",
+            ])
+              expectNoRepeatAdvice(text, `${label} REST`);
+            // The write happened.
+            expect(yield* marker(tool), label).toBe("written");
+            // Traces record no claim about what ran.
+            if (trace === undefined) return yield* Effect.die("The call's trace was not recorded");
+            const messages = yield* recorded(trace);
+            yield* evidence.json(`write-failure-${mode}-${tool}-recorded.json`, messages);
+            for (const message of messages) expectNoRepeatAdvice(message, `${label} recorded`);
+            if (tool === "ToolApprovalRequired") continue;
+            // MCP execute: the agent is told the same, and the call is never offered as a retry.
+            const executed = yield* executeOnce(
+              app.client,
+              `Call a ${mode} mutation that wrote and then failed with ${tool}`,
+              `return await ${tools}.${tool}({});`,
+              `write-failure-${mode}-${tool}.json`,
+            );
+            const failed = (yield* Schema.decodeUnknownEffect(ToolFailed)(executed.structured))
+              .execution.error;
+            expect(failed.response, label).toMatchObject({ code, retryable: false });
+            expectUnknownOutcome(failed.response.recovery);
+            expect(failed.message.startsWith(`${code} (HTTP ${status}): `), failed.message).toBe(
+              true,
+            );
+            expect(failed.message, label).toContain(
+              `Recovery: ${unknownOutcomeAction} Retryable (unchanged call): no.`,
+            );
+            expectNoRepeatAdvice(failed.message, `${label} MCP`);
+            expectNoRepeatAdvice(failed.response.recovery.instructions, `${label} MCP`);
+          }
+
+          // A kind mismatch states what happened without telling the agent to call again.
+          const mismatch = yield* call("ToolKindMismatch", "mutation");
+          expect(mismatch.body).toMatchObject({
+            message: `${unknownOutcomeAction} The tool “ToolKindMismatch” is a query, but it was called as a mutation.`,
+          });
+          const mismatched = (yield* Schema.decodeUnknownEffect(ToolFailed)(
+            (yield* executeOnce(
+              app.client,
+              `Read the ${mode} kind mismatch`,
+              `return await ${tools}.ToolKindMismatch({});`,
+              `write-failure-${mode}-kind-mismatch.json`,
+            )).structured,
+          )).execution.error;
+          expect(mismatched.message).toBe(
+            `ToolKindMismatch (HTTP 409): The tool “ToolKindMismatch” is a query, but it was called as a mutation. Recovery: ${unknownOutcomeAction} Retryable (unchanged call): no.`,
+          );
+          // A REST caller that cannot present the approval prompt is told the call may have
+          // written; MCP still presents the approval, and the approved call runs.
+          const approval = yield* call("ToolApprovalRequired", "mutation");
+          expect(approval.body).toMatchObject({
+            _tag: "ToolApprovalRequired",
+            mayHaveWritten: true,
+            message: `${unknownOutcomeAction} “ToolApprovalRequired” needs approval, and this request cannot present an approval prompt.`,
+          });
+          const parked = yield* executeOnce(
+            app.client,
+            `Ask for approval of the ${mode} mutation`,
+            `return await ${tools}.ToolApprovalRequired({});`,
+            `write-failure-${mode}-approval.json`,
+          );
+          const pending = yield* Schema.decodeUnknownEffect(Pending)(parked.structured);
+          const resumed = yield* app.client.use("Approve the mutation", (client, signal) =>
+            client.callTool(
+              {
+                name: "resume",
+                arguments: { requestId: pending.requestId, response: { action: "accept" } },
+              },
+              undefined,
+              { signal, timeout: 55_000 },
+            ),
+          );
+          expect(
+            (yield* Schema.decodeUnknownEffect(Completed)(resumed.structuredContent)).execution,
+          ).toMatchObject({ ok: true, value: "ran" });
+          // The approval policy's failure is recorded without claiming the tool did not run.
+          const policy = yield* call("ToolPolicyFailed", "mutation");
+          expect(policy.status).toBe(500);
+          const policyTrace = (yield* evidence.requests).at(-1)?.traceId;
+          if (policyTrace === undefined)
+            return yield* Effect.die("The call's trace was not recorded");
+          expect(yield* recorded(policyTrace)).toContain(
+            "The tool's approval policy failed before deciding.",
+          );
+          // A query's refusal keeps its own advice and records no write.
+          const read = yield* call("readKind", "query");
+          expect(read.status).toBe(409);
+          expect(read.body).toMatchObject({
+            _tag: "ToolKindMismatch",
+            message:
+              "The tool “readKind” is a mutation, but it was called as a query. Call it as a mutation.",
+          });
+          expect(read.body).not.toHaveProperty("mayHaveWritten");
+          // The forged reply reached the host: the skill failure's fields came from it.
+          const skill = yield* call("SkillLoadFailed", "mutation");
+          expect(skill.body).toMatchObject({ skills: { reason: "request", status: 503 } });
+          // The calls ran where the case says: the facet loads its build in facet mode.
+          yield* telemetry
+            .spans("runtime.app.build.load", {
+              "executor.app.id": app.id,
+              "executor.runtime.mode": mode,
+            })
+            .pipe(
+              Effect.flatMap((spans) =>
+                spans.length > 0
+                  ? Effect.void
+                  : Effect.fail(new Error(`Missing ${mode} build load`)),
+              ),
+              Effect.retry({ schedule: Schedule.spaced("500 millis"), times: 80 }),
+            );
+          if (mode === "facet") continue;
+          // The dashboard's tool runner shows the same warning instead of its own advice. It
+          // presents an approval for review itself, so it never reports ToolApprovalRequired.
+          yield* browser.login(actors.owner);
+          for (const [tool, description] of [
+            [
+              "ToolKindMismatch",
+              "The tool “ToolKindMismatch” is a query, but it was called as a mutation.",
+            ],
+          ] as const) {
+            yield* browser.use(`Open ${tool} in the Tools tab`, (page) =>
+              page.goto(`/org/${actors.organization.slug}/apps/${app.id}?view=tools&tool=${tool}`),
+            );
+            yield* browser.use(`Run ${tool}`, (page) =>
+              page.getByRole("button", { name: "Run tool", exact: true }).click(),
+            );
+            expect(
+              yield* browser.use(`The ${tool} failure carries the write warning`, (page) =>
+                page
+                  .getByRole("alert")
+                  .filter({ hasText: unknownOutcomeAction })
+                  .waitFor()
+                  .then(() =>
+                    page.getByRole("alert").filter({ hasText: unknownOutcomeAction }).textContent(),
+                  ),
+              ),
+            ).toBe(`${description} ${unknownOutcomeAction}`);
+            yield* browser.checkpoint(`${tool} after a write in the dashboard`);
+          }
+        }
+      }).pipe(Effect.provide(McpClient.layer)),
+    ),
+  );
+
+  it.effect(scenarios.mcpExecuteApprovalSaveFailed.title, (context) =>
+    withHostedCase(
+      context,
+      Effect.gen(function* () {
+        const api = yield* Api,
+          actors = yield* Actors;
+        // Executor's storage refuses every approval request this organization saves.
+        if (!/^[A-Za-z0-9_-]+$/.test(actors.organization.id))
+          return yield* Effect.die("Expected an organization ID");
+        yield* legacyStorage([
+          {
+            sql: `CREATE FUNCTION e2e_approval_fault() RETURNS trigger LANGUAGE plpgsql AS $$
+              BEGIN RAISE EXCEPTION 'Synthetic storage failure for an e2e approval'; END $$`,
+          },
+          {
+            sql: `CREATE TRIGGER e2e_approval_fault BEFORE INSERT ON executor_tool_approvals
+              FOR EACH ROW WHEN (NEW.owner = 'organization:${actors.organization.id}')
+              EXECUTE FUNCTION e2e_approval_fault()`,
+          },
+        ]);
+        yield* serverControl("start");
+        const app = yield* hostedAppFiles("Approval save failure", [
+          { path: "index.ts", content: approvalSaveAppSource },
+          appsManifest,
+        ]);
+        const call = (tool: string, kind: "query" | "mutation") =>
+          api.request(actors.owner, "POST", `${app.path}/tools/call`, { tool, kind, input: {} });
+
+        // REST: the policy wrote, then saving its approval request failed. The storage failure
+        // keeps its code and status, records the write, and is not offered as a retry.
+        const rest = yield* call("guarded", "mutation");
+        expect(rest.status, JSON.stringify(rest.body)).toBe(500);
+        const failure = yield* Schema.decodeUnknownEffect(RestFailure)(rest.body);
+        expect(failure).toMatchObject({
+          _tag: "StorageError",
+          mayHaveWritten: true,
+          message: "Executor could not read or write its saved data.",
+        });
+        if (failure.recovery === undefined)
+          return yield* Effect.die("The storage failure has no recovery");
+        expectUnknownOutcome(failure.recovery);
+        for (const text of [
+          failure.message,
+          failure.recovery.action,
+          failure.recovery.instructions,
+        ])
+          expectNoRepeatAdvice(text, "REST");
+        expect((yield* call("marker", "query")).body).toBe("written");
+
+        // MCP execute: the agent is told the same, and repeating the call is not advised.
+        const executed = yield* executeOnce(
+          app.client,
+          "Call a mutation whose approval could not be saved",
+          `return await tools[${JSON.stringify(app.slug)}].guarded({});`,
+          "approval-save-failed.json",
+        );
+        const failed = (yield* Schema.decodeUnknownEffect(ToolFailed)(executed.structured))
+          .execution.error;
+        expect(failed.response).toMatchObject({ code: "StorageError", retryable: false });
+        expectUnknownOutcome(failed.response.recovery);
+        expect(failed.message).toBe(
+          `StorageError (HTTP 500): Executor could not read or write its saved data. Recovery: ${unknownOutcomeAction} Retryable (unchanged call): no.`,
+        );
+        expectNoRepeatAdvice(failed.response.recovery.instructions, "MCP");
+      }).pipe(Effect.provide(McpClient.layer)),
+    ),
+  );
+  it.effect(scenarios.mcpExecuteUnnamedKindWrote.title, (context) =>
+    withHostedCase(
+      context,
+      Effect.gen(function* () {
+        const api = yield* Api,
+          actors = yield* Actors;
+        const service = yield* recordingService;
+        const app = yield* hostedApp("Unnamed kind wrote", unnamedKindAppSource(service.url));
+        const call = (kind?: "query", tool = "check") =>
+          api.request(actors.owner, "POST", `${app.path}/tools/call`, {
+            tool,
+            ...(kind === undefined ? {} : { kind }),
+            input: {},
+          });
+
+        // The caller names no kind. Reading the catalog for it ran the app's factory, which saved
+        // a record, before the catalog named the tool a query. The query's cache failure keeps
+        // the write warning and is not offered as a retry.
+        const unnamed = yield* call();
+        expect(unnamed.status, JSON.stringify(unnamed.body)).toBe(502);
+        const failure = yield* Schema.decodeUnknownEffect(RestFailure)(unnamed.body);
+        expect(unnamed.body).toMatchObject({
+          _tag: "ToolCallFailed",
+          failure: { errorName: "CacheError", code: "unavailable" },
+          mayHaveWritten: true,
+        });
+        expectUnknownOutcome(failure.recovery);
+        for (const text of [
+          failure.message,
+          failure.recovery?.action ?? "",
+          failure.recovery?.instructions ?? "",
+        ])
+          expectNoRepeatAdvice(text, "unnamed kind");
+        // The catalog read and the call each evaluated the factory once; the call ran once and
+        // was not repeated.
+        expect(yield* service.saved).toEqual(["factory", "factory", "handler"]);
+
+        // The same call named a query keeps the query's own advice.
+        const named = yield* call("query");
+        expect(named.status, JSON.stringify(named.body)).toBe(502);
+        expect(named.body).toMatchObject({
+          _tag: "ToolCallFailed",
+          recovery: {
+            action:
+              "Retry once after a short wait. If it fails again, report that the app’s storage is failing.",
+          },
+        });
+        expect(named.body).not.toHaveProperty("mayHaveWritten");
+        expect(yield* service.saved).toEqual([
+          "factory",
+          "factory",
+          "handler",
+          "factory",
+          "handler",
+        ]);
+
+        // The same holds when the query's approval policy saved a record and asked for approval:
+        // the pending request keeps the caller's missing kind, so REST, which cannot present the
+        // prompt, warns about the write instead of saying the tool has not run.
+        const pending = yield* call(undefined, "approved");
+        expect(pending.status, JSON.stringify(pending.body)).toBe(409);
+        const approval = yield* Schema.decodeUnknownEffect(RestFailure)(pending.body);
+        expect(approval).toMatchObject({ _tag: "ToolApprovalRequired", mayHaveWritten: true });
+        if (approval.recovery === undefined)
+          expect(approval.message.startsWith(`${unknownOutcomeAction} `)).toBe(true);
+        else expectUnknownOutcome(approval.recovery);
+        expect(approval.message).not.toContain("before it runs");
+        for (const text of [
+          approval.message,
+          approval.recovery?.action ?? "",
+          approval.recovery?.instructions ?? "",
+        ])
+          expectNoRepeatAdvice(text, "unnamed kind approval");
+        // The first call kept the catalog's listing, which names this tool's kind, so only the
+        // call itself evaluated the factory before the policy saved its record.
+        expect((yield* service.saved).slice(5)).toEqual(["factory", "policy"]);
+
+        // Named a query, the approval keeps the query's copy.
+        const queried = yield* call("query", "approved");
+        expect(queried.status, JSON.stringify(queried.body)).toBe(409);
+        expect(queried.body).toMatchObject({
+          _tag: "ToolApprovalRequired",
+          message:
+            "“approved” needs approval before it runs, and this request cannot present an approval prompt.",
+        });
+        expect(queried.body).not.toHaveProperty("mayHaveWritten");
+        expect((yield* service.saved).slice(7)).toEqual(["factory", "policy"]);
       }).pipe(Effect.provide(McpClient.layer)),
     ),
   );

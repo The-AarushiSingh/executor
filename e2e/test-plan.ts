@@ -2020,6 +2020,17 @@ export const scenarios = plan({
       local: na("The shared OpenAPI and MCP error path is covered on self-host."),
     },
   },
+  openapiBulkWritePartlyCommitted: {
+    fixtures: "actors",
+    file: "openapi-errors.spec.ts",
+    title:
+      "OpenAPI writes that partly commit before a declared error tell agents not to repeat them",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Uses a controlled loopback HTTP API through the shared Worker runtime."),
+      local: na("The shared OpenAPI and MCP error path is covered on self-host."),
+    },
+  },
   accountHealth: {
     fixtures: "actors",
     file: "account-health.spec.ts",
@@ -2714,6 +2725,28 @@ export const scenarios = plan({
     targets: {
       "self-host": scheduled,
       cloud: na("Uses a scoped loopback issuer and resource with controlled token expiry."),
+      local: na("Exercises the shared OAuth lifecycle through hosted APIs."),
+    },
+  },
+  oauthRenewalFailedAfterWrite: {
+    fixtures: "actors",
+    file: "oauth-refresh-resilience.spec.ts",
+    title:
+      "A write whose token the service refuses and whose renewal then fails reports an unknown outcome, while a read keeps the renewal's retry advice",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Uses a scoped loopback issuer, resource and recording service."),
+      local: na("Exercises the shared OAuth lifecycle through hosted APIs."),
+    },
+  },
+  oauthUnnamedKindRenewal: {
+    fixtures: "actors",
+    file: "oauth-refresh-resilience.spec.ts",
+    title:
+      "A call without a kind whose app code wrote and then had its token refused is not evaluated again, whether renewal fails or succeeds, in the Worker and the data facet, while a query still renews and repeats",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Uses a scoped loopback issuer, resource and recording service."),
       local: na("Exercises the shared OAuth lifecycle through hosted APIs."),
     },
   },
@@ -3477,6 +3510,16 @@ export const scenarios = plan({
     targets: {
       "self-host": na("Local dashboard and limited connection grants."),
       cloud: na("Local dashboard and limited connection grants."),
+      local: scheduled,
+    },
+  },
+  localApprovalResumeKind: {
+    file: "local-approval-resume-kind.spec.ts",
+    title:
+      "An approved call whose token the service refuses is renewed and repeated only when the caller named it a query, not when it named no kind",
+    targets: {
+      "self-host": na("Hosted products cannot resume an approval over REST."),
+      cloud: na("Hosted products cannot resume an approval over REST."),
       local: scheduled,
     },
   },
@@ -5028,6 +5071,92 @@ export const scenarios = plan({
       "self-host": scheduled,
       cloud: na("The refusing MCP server is a loopback listener."),
       local: na("Hosted self-host covers the shared app runtime error mapping."),
+    },
+  },
+  mcpExecuteCallTimedOut: {
+    fixtures: "actors",
+    file: "mcp-execute-failures.spec.ts",
+    title: "MCP tool calls their server never answers tell the agent not to repeat them",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("The silent MCP server is a loopback listener."),
+      local: na("Hosted self-host covers the shared app runtime error mapping."),
+    },
+  },
+  mcpExecuteCallDropped: {
+    fixtures: "actors",
+    file: "mcp-execute-failures.spec.ts",
+    title:
+      "MCP tool calls whose connection closes after the server ran them are not offered as retries",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("The dropping MCP server is a loopback listener."),
+      local: na("Hosted self-host covers the shared app runtime error mapping."),
+    },
+  },
+  mcpExecutePendingWriteRefused: {
+    fixtures: "actors",
+    file: "mcp-execute-failures.spec.ts",
+    title: "Writes refused while their change is still pending tell agents not to repeat them",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("The recording service is a loopback listener."),
+      local: na("Hosted self-host covers the shared tool error path."),
+    },
+  },
+  mcpExecuteNestedMcpAfterWrite: {
+    fixtures: "actors",
+    file: "mcp-execute-failures.spec.ts",
+    title: "Writes whose MCP connection fails after they wrote tell agents not to repeat them",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("The recording service and closed MCP server are loopback listeners."),
+      local: na("Hosted self-host covers the shared tool error path."),
+    },
+  },
+  mcpExecuteResolveWrote: {
+    fixtures: "actors",
+    file: "mcp-execute-failures.spec.ts",
+    title:
+      "Writes whose app code wrote before reporting a configuration, cache or MCP argument failure are not offered as retries",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("The recording service is a loopback listener."),
+      local: na("Hosted self-host covers the shared tool error path."),
+    },
+  },
+  mcpExecuteWriteFailureSurfaces: {
+    fixtures: "actors",
+    file: "mcp-execute-failures.spec.ts",
+    title:
+      "Every error a write reports after its app code received the call leads with the write warning over REST, MCP, the dashboard and traces, in the Worker and the data facet",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Self-host runs the same runner and data facet code in both modes."),
+      local: na("Hosted self-host covers the shared tool error path and both runner modes."),
+    },
+  },
+  mcpExecuteApprovalSaveFailed: {
+    fixtures: "actors",
+    legacyStorage: true,
+    file: "mcp-execute-failures.spec.ts",
+    title:
+      "A write whose approval request Executor cannot save reports a storage failure that records the write and is not offered as a retry, over REST and MCP",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Storage faults need a runner-owned database; Cloud cases share one."),
+      local: na("Hosted self-host covers the shared tool call path."),
+    },
+  },
+  mcpExecuteUnnamedKindWrote: {
+    fixtures: "actors",
+    file: "mcp-execute-failures.spec.ts",
+    title:
+      "A call that names no kind keeps the write warning after the catalog names its tool a query, when it fails or its approval policy asks for approval, and is not repeated",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("The recording service is a loopback listener."),
+      local: na("Hosted self-host covers the shared tool call path."),
     },
   },
   patMcpInFlight: {

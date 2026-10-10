@@ -147,9 +147,13 @@ These are the defaults. The source limit is fixed; a host can change the others.
 
 A completed result has `execution.ok`. On success, `execution.value` holds what
 the program returned. On failure, `execution.error` has a `kind`, a `message`,
-and for Executor errors a `response` with `code`, `status`, `message` and
-`recovery`. `recovery.action` is for the user; `recovery.instructions` are for
-you. `toolCalls` lists every call in order with its `outcome`.
+and for Executor errors a `response` with `code`, `status`, `message`,
+`recovery` and `retryable`. `recovery.action` is for the user;
+`recovery.instructions` are for you. `retryable` means an unchanged repeat may
+help and is considered safe. It does not guarantee success. Correcting input,
+configuration or access may allow a new attempt even when `retryable` is false.
+Never rerun an entire `execute` program merely to retry one failed tool.
+`toolCalls` lists every call in order with its `outcome`.
 
 - `ParseError`, `UnsupportedSyntax`: fix the program; `location` points at it.
 - `UnknownTool`: the path is wrong, its app did not load, or the app was
@@ -162,7 +166,8 @@ you. `toolCalls` lists every call in order with its `outcome`.
   executions.
 
 Calls with outcome `success` took effect, and `interrupted` calls may have.
-Effects are never rolled back. Read the current state before retrying a write.
+Effects are never rolled back. When Executor could not confirm a failed write's
+outcome, its recovery says so: do not repeat it automatically.
 Inside a program, a caught tool error's `message` is the same JSON as
 `response`, so a program can handle expected failures itself.
 

@@ -109,6 +109,17 @@ export const McpToolCall = Schema.Struct({
   durationMs: Schema.optionalKey(Schema.Number),
 });
 export type McpToolCall = typeof McpToolCall.Type;
+/**
+ * A failed tool's curated explanation as an agent receives it; a program can read it from a
+ * caught tool error. `retryable` means an unchanged repeat may help and is considered safe. It
+ * does not guarantee success, and correcting the input, configuration or access may allow a new
+ * attempt even when it is false.
+ */
+export const McpErrorResponse = Schema.Struct({
+  ...ApiErrorResponse.fields,
+  retryable: Schema.Boolean,
+});
+export type McpErrorResponse = typeof McpErrorResponse.Type;
 /** Program result plus apps that could not expose a live catalog during this execution. */
 export const ExecuteResult = Schema.Struct({
   execution: Schema.Union([
@@ -117,7 +128,7 @@ export const ExecuteResult = Schema.Struct({
       ...CodeMode.Failure.fields,
       error: Schema.Struct({
         ...CodeMode.Diagnostic.fields,
-        response: Schema.optionalKey(ApiErrorResponse),
+        response: Schema.optionalKey(McpErrorResponse),
       }),
       toolCalls: Schema.Array(McpToolCall),
     }),

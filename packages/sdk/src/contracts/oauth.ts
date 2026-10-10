@@ -1030,7 +1030,7 @@ export const OAuthRenewalFailed = UserFacingError.define({
           service_unavailable: {
             ...serviceUnavailable,
             description:
-              "Executor could not renew this account’s access because the service’s sign-in is down, busy, or unreachable. The saved sign-in is kept, so the account does not need to reconnect.",
+              "Executor could not renew this account’s access. The sign-in endpoint may be unavailable or unreachable. The saved sign-in is kept; this error does not require reconnecting.",
             recovery: {
               action: "Try again in a moment. If this continues, check the service’s status.",
               instructions:
@@ -1041,16 +1041,20 @@ export const OAuthRenewalFailed = UserFacingError.define({
             ...incompatibleResponse,
             description:
               "The service answered Executor’s request to renew this account’s access, but its response did not match what Executor expects. The saved sign-in is kept; this is a compatibility problem, not a problem with your account.",
+            recovery: {
+              ...incompatibleResponse.recovery,
+              action: "Investigate the incompatible response before retrying renewal.",
+            },
           },
           client_rejected: {
             title: "The service rejected Executor’s OAuth client",
             description:
-              "The service refused the OAuth client Executor uses to renew this account’s access. This is a problem with the client configuration, not with the account’s sign-in, which is kept.",
+              "The service rejected the OAuth client used for renewal. Check client configuration and how the renewal request authenticates. The account’s sign-in is kept.",
             recovery: {
               action:
                 "Check the OAuth client ID and secret at the service. If they changed, reconnect the account and enter the current client details.",
               instructions:
-                "The account’s saved OAuth grant is intact; do not delete or replace the account. Compare the client ID, secret and token endpoint authentication method recorded for this provider with the service’s client configuration. If the secret was rotated or the client removed, reconnect this same account with the current client details. If the configuration is correct, the fault is in how Executor authenticates the client; report it rather than reconnecting.",
+                "The account’s saved OAuth grant is intact; do not delete or replace the account. Compare the client ID, secret and token endpoint authentication method recorded for this provider with the service’s client configuration. If the secret was rotated or the client removed, reconnect this same account with the current client details. If the configuration is correct, investigate the client-authentication request.",
             },
           },
           renewal_rejected: {
@@ -1059,9 +1063,9 @@ export const OAuthRenewalFailed = UserFacingError.define({
               "The service refused Executor’s request to renew this account’s access without saying the sign-in has ended. The saved sign-in is kept, and Executor tries again the next time the account is used.",
             recovery: {
               action:
-                "Try again in a moment. If this continues, reconnect the account from the app’s Accounts tab.",
+                "Inspect the renewal refusal. Retry a temporary failure; reconnect only when the service’s response indicates that it is needed.",
               instructions:
-                "The account’s saved OAuth grant is intact. Inspect the recorded provider error code and HTTP status. Retry a temporary refusal. If the service keeps refusing, reconnect this same account; do not replace the account or change its authentication method.",
+                "The account’s saved OAuth grant is intact. Inspect the recorded provider error code and HTTP status. Retry a temporary refusal. A refusal that continues does not by itself show that the sign-in has ended: reconnect this same account only when the service’s response indicates that reconnecting is needed. Do not replace the account or change its authentication method.",
             },
             retryable: true,
           },

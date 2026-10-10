@@ -6,7 +6,7 @@ import {
   AppSlug,
   JsonObject,
   routerFailure,
-  ToolApprovalRequired,
+  approvalRequired,
   ToolListingTimedOut,
   type App,
   type AppId,
@@ -1064,13 +1064,7 @@ function catalog(backend: McpBackend<Error>, progress: ExecutionProgress) {
                             Effect.flatMap((result) =>
                               result.status === "completed"
                                 ? Effect.succeed(result.value)
-                                : Effect.fail(
-                                    new ToolApprovalRequired({
-                                      app: result.invocation.app,
-                                      deployment: result.invocation.deployment,
-                                      tool: result.invocation.tool,
-                                    }),
-                                  ),
+                                : Effect.fail(approvalRequired(result)),
                             ),
                             Effect.mapError((error) => toolError(diagnostic(error))),
                           ),
