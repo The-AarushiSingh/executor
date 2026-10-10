@@ -1424,19 +1424,86 @@ export const approvalRequired = ({ invocation }: Pick<typeof ToolPending.Type, "
     tool: invocation.tool,
     ...(invocation.kind === "query" ? {} : { mayHaveWritten: true as const }),
   });
+/** Every way a live call fails. A resumed call is the same call, so it fails the same ways. */
+const toolCallErrors = [
+  ...ProfileErrors,
+  StorageError,
+  CredentialsError,
+  AppNotFound,
+  AppNotDeployed,
+  DeploymentNotFound,
+  AppEvaluationFailed,
+  AppProviderFailed,
+  AccountNotFound,
+  AccountRequired,
+  AccountSelectionInvalid,
+  ToolNotFound,
+  ToolKindMismatch,
+  InputInvalid,
+  ToolCallFailed,
+  OAuthReconnectRequired,
+  OAuthRenewalFailed,
+  ToolBlocked,
+  ToolApprovalRequired,
+  ToolPolicyFailed,
+  ToolElicitationFailed,
+  RequestInvalid,
+] as const;
+/**
+ * What resuming an approved call failed with, exactly as the live call would report it. Some of
+ * these, such as an account that no longer resolves, fail before the tool's code is dispatched.
+ */
+export const ToolResumeFailure = Schema.Union(toolCallErrors);
+export type ToolResumeFailure = typeof ToolResumeFailure.Type;
 /** Only the consuming caller receives an execution result. Duplicates do not replay it. */
 export const ToolResumeResult = Schema.Union([
   ToolCompleted,
   Schema.Struct({ status: Schema.Literal("denied"), requestId: ApprovalRequestId }),
   Schema.Struct({ status: Schema.Literal("cancelled"), requestId: ApprovalRequestId }),
+  /**
+   * Executor did not resume the saved call: the request expired, or Executor read the app,
+   * deployment, profile or accounts and they differ from the reviewed call.
+   */
   Schema.Struct({
     status: Schema.Literal("failed"),
     requestId: ApprovalRequestId,
-    reason: Schema.Literals(["expired", "context-changed", "execution-failed"]),
+    reason: Schema.Literals(["expired", "context-changed"]),
+  }),
+  /** Resuming the approved call failed with the error a live call reports. */
+  Schema.Struct({
+    status: Schema.Literal("failed"),
+    requestId: ApprovalRequestId,
+    reason: Schema.Literal("execution-failed"),
+    error: ToolResumeFailure,
+    /**
+     * `unconfirmed`: Executor's own storage failed, with `error`, while it read the current app,
+     * deployment, profile or accounts to compare with the reviewed call, so it did not resume the
+     * call. Nothing shows that they changed. It is a field, not a reason: clients that predate it,
+     * such as dashboards still open during a deploy, reject an unknown reason but ignore a field.
+     */
+    context: Schema.optionalKey(Schema.Literal("unconfirmed")),
   }),
   Schema.Struct({ status: Schema.Literal("already-consumed"), requestId: ApprovalRequestId }),
 ]);
 export type ToolResumeResult = typeof ToolResumeResult.Type;
+/**
+ * A resume result as a client receives it. Servers always send a `ToolResumeResult`, but servers
+ * from releases before `error` was added send `execution-failed` without it. A client can meet one:
+ * an open dashboard tab outlives a rollback, and Cloud deploys its dashboard and API separately.
+ * So this also accepts that member with neither `error` nor `context`; a supplied one must decode
+ * as above.
+ */
+export const ToolResumeResultReceived = ToolResumeResult.mapMembers((members) => [
+  ...members,
+  Schema.Struct({
+    status: Schema.Literal("failed"),
+    requestId: ApprovalRequestId,
+    reason: Schema.Literal("execution-failed"),
+    error: Schema.optionalKey(Schema.Never),
+    context: Schema.optionalKey(Schema.Never),
+  }),
+]);
+export type ToolResumeResultReceived = typeof ToolResumeResultReceived.Type;
 /**
  * A pending request a host reads to show the person the call it would resume. The arguments are the
  * saved invocation's. The issuer is the host's own record; the host refuses requests it did not issue.
@@ -1585,30 +1652,7 @@ export const ToolsGroup = HttpApiGroup.make("tools")
     HttpApiEndpoint.post("call", "/v1/tools/call", {
       payload: ToolInputs.call,
       success: ToolCallResult,
-      error: [
-        ...ProfileErrors,
-        StorageError,
-        CredentialsError,
-        AppNotFound,
-        AppNotDeployed,
-        DeploymentNotFound,
-        AppEvaluationFailed,
-        AppProviderFailed,
-        AccountNotFound,
-        AccountRequired,
-        AccountSelectionInvalid,
-        ToolNotFound,
-        ToolKindMismatch,
-        InputInvalid,
-        ToolCallFailed,
-        OAuthReconnectRequired,
-        OAuthRenewalFailed,
-        ToolBlocked,
-        ToolApprovalRequired,
-        ToolPolicyFailed,
-        ToolElicitationFailed,
-        RequestInvalid,
-      ],
+      error: toolCallErrors,
     }),
   )
   .add(

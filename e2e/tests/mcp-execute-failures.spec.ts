@@ -1,13 +1,13 @@
 /** Failed and timed-out MCP executions report what happened instead of losing it. */
 import { expect, layer } from "@effect/vitest";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
-import { Clock, Effect, Layer, Ref, Schedule, Schema } from "effect";
+import { Clock, Effect, Fiber, Layer, Ref, Schedule, Schema } from "effect";
 import { HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { createServer } from "node:http";
 import { Socket } from "node:net";
 import { randomUUID } from "node:crypto";
 import { scenarios } from "../test-plan.ts";
-import { Api, body } from "../support/api.ts";
+import { Api, body, SessionClients } from "../support/api.ts";
 import { Actors } from "../support/actors.ts";
 import { Browser } from "../support/browser.ts";
 import { App } from "../support/contracts.ts";
@@ -25,6 +25,10 @@ import {
 import { recordingService } from "../support/recording-service.ts";
 import { legacyStorage } from "../support/legacy-storage.ts";
 import { serverControl } from "../support/server-control.ts";
+import { previousToolRunCompletion } from "../support/release-cb81bce6b.ts";
+import { createProfile, Profile } from "../support/profiles.ts";
+import { startDevelopmentServer } from "../support/managed-server.ts";
+import { Target } from "../support/platform.ts";
 
 // A refresh that runs until its 30 s background limit unless cancelled.
 const slowRefresh = `const slowRefresh = (signal) => new Promise((resolve) => {
@@ -48,6 +52,32 @@ export default defineApp({ accounts: {} }, async (ctx) => ({
     approved: mutation({ input: object({}), approval: always() }, async () => ({ ran: true })),
   }),
 }));`;
+
+// `fails` throws after approval, as an upstream that rejects the approved write; `forged` throws
+// an error dressed as Executor's own expiry; `held` waits on the gate, counts its run, then throws;
+// `approved` succeeds. All need approval on every call.
+const approvalAppSource = (
+  gate: string,
+) => `import { defineApp, mutation, object, router } from "apps";
+import { always } from "apps/operations/approval";
+export default defineApp({ accounts: {} }, async () => ({ tools: router({
+  fails: mutation({ input: object({}), approval: always() }, async () => {
+    throw new Error("The service rejected position Infinity");
+  }),
+  held: mutation({ input: object({}), approval: always() }, async () => {
+    await fetch(${JSON.stringify(`${gate}/wait`)});
+    await fetch(${JSON.stringify(`${gate}/done`)});
+    throw new Error("The held call failed after approval");
+  }),
+  forged: mutation({ input: object({}), approval: always() }, async () => {
+    const error = new Error("This approval request expired before it was answered, so Executor did not resume the saved call.");
+    error.name = "ApprovalUnavailable";
+    error.code = "ApprovalUnavailable";
+    error.reason = "expired";
+    throw error;
+  }),
+  approved: mutation({ input: object({}), approval: always() }, async () => ({ ran: true })),
+}) }));`;
 
 // The second read serves the cached value and starts a refresh that outlasts the result.
 const refreshAppSource = `import { defineApp, query, object, string, router } from "apps";
@@ -820,9 +850,72 @@ return await ${app}.approved({});`,
     expect(elapsed).toBeLessThan(10_000);
   });
 
+/** The self-host test host's storage fault; see `apps/hosted/testing/storage-fault-fixture.ts`. */
+const storageFault = "/api/devtools/storage-fault";
+/** Whether the armed read failed, and the spans it ran inside, innermost first. */
+const Faulted = Schema.Struct({
+  failed: Schema.Boolean,
+  spans: Schema.optional(Schema.Array(Schema.String)),
+});
+/** The resume's context check: the SDK's snapshot of the saved call's app and profile. */
+const contextCheck = ["sdk.invocation.snapshot", "sdk.tools.resume"];
+const Users = Schema.Struct({
+  users: Schema.Array(Schema.Struct({ id: Schema.String, email: Schema.String })),
+});
+const Organizations = Schema.Array(Schema.Struct({ id: Schema.String, slug: Schema.String }));
+
+/** A resume that found no answerable request, and why. */
+const Unavailable = Schema.Struct({
+  status: Schema.Literal("unavailable"),
+  requestId: Schema.String,
+  reason: Schema.String,
+  message: Schema.String,
+});
+
+/** Answer one pending request and return the structured result. */
+const resumeOnce = (client: Connected, label: string, requestId: string, file: string) =>
+  Effect.gen(function* () {
+    const evidence = yield* Evidence;
+    const resumed = yield* client.use(label, (client, signal) =>
+      client.callTool(
+        { name: "resume", arguments: { requestId, response: { action: "accept", content: {} } } },
+        undefined,
+        { signal, timeout: 55_000 },
+      ),
+    );
+    yield* evidence.json(file, resumed.structuredContent);
+    return resumed.structuredContent;
+  });
+
+/** Run one program until it asks for approval and return the request ID. */
+const pendingApproval = (client: Connected, label: string, code: string, file: string) =>
+  executeOnce(client, label, code, file).pipe(
+    Effect.flatMap(({ structured }) => Schema.decodeUnknownEffect(Pending)(structured)),
+    Effect.map(({ requestId }) => requestId),
+  );
+
 /** Deploy an app in the hosted organization and connect a PAT MCP client to it. */
 const hostedApp = (name: string, source: string) =>
   hostedAppFiles(name, [{ path: "index.ts", content: source }, appsManifest]);
+
+/** Connect another MCP client through a PAT of its own, so a separate grant, as `member` or the owner. */
+const otherGrant = (name: string, member = false) =>
+  Effect.gen(function* () {
+    const api = yield* Api,
+      actors = yield* Actors,
+      mcp = yield* McpClient;
+    const actor = member ? actors.member : actors.owner;
+    const key = yield* body(
+      Schema.Struct({ id: Schema.String, key: Schema.RedactedFromValue(Schema.String) }),
+      yield* api.request(actor, "POST", "/api/auth/api-key/create", { name }),
+    );
+    yield* Effect.addFinalizer(() =>
+      api.request(actor, "POST", "/api/auth/api-key/delete", { keyId: key.id }).pipe(Effect.orDie),
+    );
+    return yield* mcp.connect(key.key, name.toLowerCase().replaceAll(" ", "-"), {
+      organization: actors.organization.id,
+    });
+  });
 
 /** Deploy these files as a hosted app and connect a PAT MCP client to it. */
 const hostedAppFiles = (
@@ -869,6 +962,370 @@ layer(HostedLive, { excludeTestServices: true })("Hosted MCP execute failures", 
       Effect.gen(function* () {
         const { client, slug } = yield* hostedApp("Approval after refresh", slowAppSource);
         yield* checkApprovalAfterRefresh(client, slug);
+      }).pipe(Effect.provide(McpClient.layer)),
+    ),
+  );
+
+  it.effect(scenarios.mcpResumeReasons.title, (context) =>
+    withHostedCase(
+      context,
+      Effect.gen(function* () {
+        const api = yield* Api,
+          actors = yield* Actors;
+        const gate = yield* requestGate;
+        const { client, slug, path } = yield* hostedApp(
+          "Approval outcomes",
+          approvalAppSource(gate.origin),
+        );
+        const app = `tools[${JSON.stringify(slug)}]`;
+
+        // Accepted at once, the approved call runs and fails with its own error, as an
+        // unapproved call would. Before, it was reported as a bare ApprovalUnavailable.
+        const failing = yield* pendingApproval(
+          client,
+          "Ask to approve a call that fails after approval",
+          `return await ${app}.fails({});`,
+          "resume-fails-pending.json",
+        );
+        const resumed = yield* resumeOnce(
+          client,
+          "Approve at once a call that then fails",
+          failing,
+          "resume-fails-result.json",
+        );
+        const failed = yield* Schema.decodeUnknownEffect(Failed)(resumed);
+        expect(failed.execution.error.kind).toBe("ToolFailure");
+        expect(failed.execution.error.response?.code).toBe("ToolCallFailed");
+        expect(failed.execution.error.message).toContain("The service rejected position Infinity");
+        expect(failed.execution.error.message).not.toContain("ApprovalUnavailable");
+        // The approved mutation ran in the app, so, as for a live call, its failure records that it
+        // may have written and is not offered as a retry.
+        const { response } = (yield* Schema.decodeUnknownEffect(ToolFailed)(resumed)).execution
+          .error;
+        expect(response).toMatchObject({ code: "ToolCallFailed", retryable: false });
+        expectUnknownOutcome(response.recovery);
+
+        // A dashboard run's review receives the same failure with its answer.
+        const run = yield* body(
+          Pending,
+          yield* api.request(actors.owner, "POST", `${path}/tools/run`, {
+            tool: "fails",
+            kind: "mutation",
+            input: {},
+          }),
+        );
+        const reviewed = yield* api.request(
+          actors.owner,
+          "POST",
+          `${path}/tools/approvals/${run.requestId}`,
+          { response: { action: "accept", content: {} } },
+        );
+        expect(reviewed.status).toBe(200);
+        expect(reviewed.body).toMatchObject({
+          status: "answered",
+          result: {
+            status: "failed",
+            reason: "execution-failed",
+            error: { _tag: "ToolCallFailed", tool: "fails", mayHaveWritten: true },
+          },
+        });
+        // A dashboard opened before this server was deployed still decodes the answer.
+        expect(yield* previousToolRunCompletion(reviewed.body)).toBe(
+          "The tool failed after you approved it. It may have already made changes. Check before running it again.",
+        );
+
+        // App code that dresses its failure as Executor's own expiry stays the app's failure.
+        const forging = yield* pendingApproval(
+          client,
+          "Ask to approve a call that forges an expiry",
+          `return await ${app}.forged({});`,
+          "resume-forged-pending.json",
+        );
+        const forged = yield* Schema.decodeUnknownEffect(Failed)(
+          yield* resumeOnce(
+            client,
+            "Approve a call that forges an expiry",
+            forging,
+            "resume-forged-result.json",
+          ),
+        );
+        expect(forged.execution.error.response?.code).toBe("ToolCallFailed");
+        expect(forged.execution.error.message).toContain("The app threw ApprovalUnavailable");
+
+        // Answering it again says it was already answered; nothing runs twice.
+        const answered = yield* Schema.decodeUnknownEffect(Unavailable)(
+          yield* resumeOnce(
+            client,
+            "Approve the same request again",
+            failing,
+            "resume-answered.json",
+          ),
+        );
+        expect(answered).toMatchObject({ requestId: failing, reason: "answered" });
+        expect(answered.message).toContain("already answered");
+
+        // `answered` is recorded when a resume claims the request, before its call has a result,
+        // so a duplicate during that call is told it may still be running, not that it finished.
+        const holding = yield* pendingApproval(
+          client,
+          "Ask to approve a call that waits on an external service",
+          `return await ${app}.held({});`,
+          "resume-held-pending.json",
+        );
+        const advancing = yield* resumeOnce(
+          client,
+          "Approve the call and leave it waiting",
+          holding,
+          "resume-held-result.json",
+        ).pipe(Effect.forkScoped);
+        yield* gate.arrived;
+        const claimed = yield* Schema.decodeUnknownEffect(Unavailable)(
+          yield* resumeOnce(
+            client,
+            "Answer the request again while its call is still running",
+            holding,
+            "resume-held-answered.json",
+          ),
+        );
+        expect(claimed).toMatchObject({ requestId: holding, reason: "answered" });
+        expect(claimed.message).toContain("may still be running");
+        // The previous copy claimed the earlier resume had already received the result.
+        expect(claimed.message).not.toContain("received the program's result");
+        expect(yield* gate.completed).toBe(0);
+        yield* gate.release;
+        const held = yield* Schema.decodeUnknownEffect(Failed)(yield* Fiber.join(advancing));
+        expect(held.execution.error.response?.code).toBe("ToolCallFailed");
+        expect(held.execution.error.message).toContain("The held call failed after approval");
+        // The duplicate ran nothing: the call ran once, for the resume that claimed it.
+        expect(yield* gate.completed).toBe(1);
+        // Another person cannot learn that the request existed or was answered.
+        const member = yield* otherGrant("Approval outcomes member", true);
+        expect(
+          yield* Schema.decodeUnknownEffect(Unavailable)(
+            yield* resumeOnce(
+              member,
+              "Another person answers the answered request",
+              failing,
+              "resume-member-not-found.json",
+            ),
+          ),
+        ).toMatchObject({ requestId: failing, reason: "not-found" });
+
+        // Another grant cannot see the request, and its attempt leaves it pending for its owner.
+        const pending = yield* pendingApproval(
+          client,
+          "Ask to approve a call from the first grant",
+          `return await ${app}.approved({});`,
+          "resume-other-grant-pending.json",
+        );
+        const other = yield* otherGrant("Approval outcomes other grant");
+        const foreign = yield* Schema.decodeUnknownEffect(Unavailable)(
+          yield* resumeOnce(
+            other,
+            "Answer the first grant's request from another grant",
+            pending,
+            "resume-not-found.json",
+          ),
+        );
+        expect(foreign).toMatchObject({ requestId: pending, reason: "not-found" });
+        expect(foreign.message).not.toContain("already answered");
+        const owned = yield* Schema.decodeUnknownEffect(Completed)(
+          yield* resumeOnce(
+            client,
+            "Approve the request from its own grant",
+            pending,
+            "resume-own-grant.json",
+          ),
+        );
+        expect(owned.execution).toMatchObject({ ok: true, value: { ran: true } });
+
+        // A profile that changes while its call waits is not resumed with other settings.
+        const profile = yield* createProfile(actors.owner, path);
+        const changing = yield* pendingApproval(
+          client,
+          "Ask to approve a call through a profile",
+          `return await ${app}.profiles[${JSON.stringify(profile.id)}].approved({});`,
+          "resume-context-pending.json",
+        );
+        expect(
+          (yield* api.request(actors.owner, "PATCH", `${path}/profiles/${profile.id}`, {
+            expectedRevision: profile.revision,
+            accounts: {},
+          })).status,
+        ).toBe(200);
+        const changed = yield* Schema.decodeUnknownEffect(Failed)(
+          yield* resumeOnce(
+            client,
+            "Approve the call after its profile changed",
+            changing,
+            "resume-context-changed.json",
+          ),
+        );
+        expect(changed.execution.error.response?.code).toBe("ApprovalUnavailable");
+        expect(changed.execution.error.message).toContain("changed");
+        expect(changed.execution.error.message).not.toContain("did not run");
+      }).pipe(Effect.provide(McpClient.layer)),
+    ),
+  );
+
+  it.effect(scenarios.mcpResumeContextUnconfirmed.title, (context) =>
+    withHostedCase(
+      context,
+      Effect.gen(function* () {
+        const target = yield* Target,
+          mcp = yield* McpClient,
+          evidence = yield* Evidence;
+        // Only the test entry point mounts the storage fault.
+        const origin = yield* startDevelopmentServer(target);
+        const api = yield* Api.pipe(
+          Effect.provide(Layer.fresh(Api.layer)),
+          Effect.provide(Layer.fresh(SessionClients.layer)),
+          Effect.provideService(Target, { ...target, metadata: { ...target.metadata, origin } }),
+        );
+        const owner = yield* api.session(),
+          headers = { origin };
+        const send = (method: "GET" | "POST" | "DELETE", path: string, payload?: unknown) =>
+          api.request(owner, method, `${origin}${path}`, payload, headers);
+        expect((yield* send("POST", "/api/devtools/operator", {})).status).toBe(200);
+        const directory = yield* body(Users, yield* send("GET", "/api/auth/admin/list-users"));
+        const developer = directory.users.find((user) => user.email === "agent-agent@example.test");
+        if (!developer) return yield* Effect.die("Development owner is missing");
+        expect(
+          (yield* send("POST", "/api/auth/admin/impersonate-user", { userId: developer.id }))
+            .status,
+        ).toBe(200);
+        const organization = (yield* body(
+          Organizations,
+          yield* send("GET", "/api/auth/organization/list"),
+        ))[0];
+        if (!organization) return yield* Effect.die("Development organization is missing");
+        const prefix = `/api/organizations/${organization.id}`;
+        // A failed assertion must not leave the fault armed.
+        yield* Effect.addFinalizer(() => send("DELETE", storageFault).pipe(Effect.orDie));
+
+        const gate = yield* requestGate;
+        const deployed = yield* send("POST", `${prefix}/apps/deploy`, {
+          name: `Unconfirmed context ${randomUUID().slice(0, 8)}`,
+          files: [{ path: "index.ts", content: approvalAppSource(gate.origin) }, appsManifest],
+        });
+        expect(deployed.status, JSON.stringify(deployed.body)).toBe(200);
+        const app = yield* body(App, deployed);
+        const path = `${prefix}/apps/${app.id}`;
+        yield* Effect.addFinalizer(() => send("DELETE", path).pipe(Effect.orDie));
+        const profile = yield* body(
+          Profile,
+          yield* send("POST", `${path}/profiles`, { accounts: {}, idempotencyKey: randomUUID() }),
+        );
+        const key = yield* body(
+          Schema.Struct({ id: Schema.String, key: Schema.RedactedFromValue(Schema.String) }),
+          yield* send("POST", "/api/auth/api-key/create", { name: "Unconfirmed context" }),
+        );
+        yield* Effect.addFinalizer(() =>
+          send("POST", "/api/auth/api-key/delete", { keyId: key.id }).pipe(Effect.orDie),
+        );
+        const client = yield* mcp.connect(key.key, "unconfirmed-context", {
+          organization: organization.id,
+          origin,
+        });
+        const call = `return await tools[${JSON.stringify(app.slug)}].profiles[${JSON.stringify(profile.id)}].approved({});`;
+        /**
+         * Fail the resume's read of this profile in its context check. The host's own reads of
+         * the profile, which authorize the caller first, are left alone: a failure there is a
+         * `StorageError` before the SDK checks the context.
+         */
+        const failContextCheck = send("POST", storageFault, {
+          profile: profile.id,
+          within: contextCheck,
+        }).pipe(Effect.map((armed) => expect(armed.status).toBe(200)));
+        /** The fault fired, and on a read inside the context check. */
+        const faultedContextCheck = (message: string, file: string) =>
+          Effect.gen(function* () {
+            const faulted = yield* body(Faulted, yield* send("GET", storageFault));
+            yield* evidence.json(file, faulted);
+            expect(faulted, message).toEqual({
+              failed: true,
+              spans: expect.arrayContaining(contextCheck),
+            });
+          });
+
+        // Storage fails while the resume reads the profile to compare it with the reviewed call.
+        const pending = yield* pendingApproval(
+          client,
+          "Ask to approve a call through a profile",
+          call,
+          "resume-unconfirmed-pending.json",
+        );
+        yield* failContextCheck;
+        const resumed = yield* resumeOnce(
+          client,
+          "Approve the call while its profile cannot be read",
+          pending,
+          "resume-unconfirmed.json",
+        );
+        yield* faultedContextCheck(
+          "The MCP resume's context check read the profile",
+          "resume-unconfirmed-fault.json",
+        );
+        const unconfirmed = yield* Schema.decodeUnknownEffect(Failed)(resumed);
+        expect(unconfirmed.execution.error.response?.code).toBe("ApprovalUnavailable");
+        expect(unconfirmed.execution.error.message).toContain("could not read");
+        expect(unconfirmed.execution.error.message).toContain("storage failed");
+        // Before, a failed read was reported as a change Executor never observed.
+        expect(unconfirmed.execution.error.message).not.toContain(
+          "changed after this call was saved",
+        );
+
+        // Nothing changed: once storage answers, the same call through the profile runs.
+        const again = yield* pendingApproval(
+          client,
+          "Ask again once storage answers",
+          call,
+          "resume-unconfirmed-again-pending.json",
+        );
+        expect(
+          (yield* Schema.decodeUnknownEffect(Completed)(
+            yield* resumeOnce(
+              client,
+              "Approve the call with storage answering",
+              again,
+              "resume-unconfirmed-again.json",
+            ),
+          )).execution,
+        ).toMatchObject({ ok: true, value: { ran: true } });
+
+        // A dashboard review receives the storage error, not a changed-context answer.
+        const run = yield* body(
+          Pending,
+          yield* send("POST", `${path}/tools/run`, {
+            tool: "approved",
+            kind: "mutation",
+            input: {},
+            profile: profile.id,
+          }),
+        );
+        yield* failContextCheck;
+        const reviewed = yield* send("POST", `${path}/tools/approvals/${run.requestId}`, {
+          response: { action: "accept", content: {} },
+        });
+        expect(reviewed.status, JSON.stringify(reviewed.body)).toBe(200);
+        expect(reviewed.body).toMatchObject({
+          status: "answered",
+          result: {
+            status: "failed",
+            reason: "execution-failed",
+            context: "unconfirmed",
+            error: { _tag: "StorageError" },
+          },
+        });
+        // A dashboard opened before this server was deployed rejects an unknown reason as "Cannot
+        // reach Executor". It ignores the field, so it still shows that the call failed.
+        expect(yield* previousToolRunCompletion(reviewed.body)).toBe(
+          "The tool failed after you approved it. It may have already made changes. Check before running it again.",
+        );
+        yield* faultedContextCheck(
+          "The dashboard resume's context check read the profile",
+          "review-unconfirmed-fault.json",
+        );
       }).pipe(Effect.provide(McpClient.layer)),
     ),
   );

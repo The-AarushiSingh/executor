@@ -441,6 +441,17 @@ export const scenarios = plan({
       local: na("Local does not have organization memberships."),
     },
   },
+  hostedToolRunnerPreviousServer: {
+    fixtures: "actors",
+    file: "tool-runner-approvals.spec.ts",
+    title:
+      "Hosted dashboard reviews show what the previous release's server answered and never offer an answer Executor received again",
+    targets: {
+      "self-host": scheduled,
+      cloud: scheduled,
+      local: na("Local shares the review card and its decoder with hosted dashboards."),
+    },
+  },
   activeDeploymentResume: {
     fixtures: "actors",
     file: "active-deployment-tools.spec.ts",
@@ -5054,6 +5065,28 @@ export const scenarios = plan({
       "self-host": scheduled,
       cloud: scheduled,
       local: na("Hosted self-host covers the shared execution driver."),
+    },
+  },
+  mcpResumeReasons: {
+    fixtures: "actors",
+    file: "mcp-execute-failures.spec.ts",
+    title:
+      "Hosted MCP resume reports an approved call's own failure and why a request cannot be answered",
+    targets: {
+      "self-host": scheduled,
+      cloud: scheduled,
+      local: na("Hosted self-host covers the shared execution manager and SDK resume."),
+    },
+  },
+  mcpResumeContextUnconfirmed: {
+    fixtures: "actors",
+    file: "mcp-execute-failures.spec.ts",
+    title:
+      "Hosted MCP resume reports a storage failure while checking an approved call's context as unconfirmed, not changed",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("The storage fault is mounted by the self-host test entry point."),
+      local: na("Hosted self-host covers the shared SDK resume and execution manager."),
     },
   },
   mcpExecuteRefreshNotAwaited: {

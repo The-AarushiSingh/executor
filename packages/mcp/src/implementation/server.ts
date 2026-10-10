@@ -74,10 +74,11 @@ const observeExecution =
                   "error.type": "CapacityExceeded",
                 }),
               ),
-              Match.when({ status: "unavailable" }, () =>
+              Match.when({ status: "unavailable" }, ({ reason }) =>
                 Effect.annotateCurrentSpan({
                   "executor.outcome": "failed",
                   "error.type": "ContinuationUnavailable",
+                  "executor.resume.unavailable_reason": reason,
                 }),
               ),
               Match.when({ status: "busy" }, () =>
@@ -234,7 +235,7 @@ export const makeMcp = (options: McpOptions) =>
                                   );
                               const pending = yield* executions.pendingInteraction(id, requestId);
                               return yield* pending === undefined
-                                ? Effect.succeed({ status: "unavailable" as const, requestId })
+                                ? executions.unavailable(id, requestId)
                                 : withLink(pending, sessionId, delivery);
                             }),
                           ),

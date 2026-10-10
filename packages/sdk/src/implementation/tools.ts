@@ -23,7 +23,13 @@ import {
   type HostAccount,
   type HostAccounts,
 } from "apps/contracts";
-import { AccountRequired, AppNotFound, AppNotDeployed } from "../contracts/apps.ts";
+import {
+  AccountRequired,
+  AccountSelectionInvalid,
+  AppNotFound,
+  AppNotDeployed,
+} from "../contracts/apps.ts";
+import { AccountNotFound } from "../contracts/account.ts";
 import { DeploymentNotFound } from "../contracts/deployment.ts";
 import type { ResourceLifecycle } from "../contracts/executor.ts";
 import type { Executor } from "../contracts/executor.ts";
@@ -75,7 +81,7 @@ import { makeToolApprovals } from "./tool-approvals.ts";
 import { storedDeployment } from "./apps.ts";
 import { database, query, type Query } from "./database.ts";
 import { storedProfile } from "./profiles.ts";
-import { CurrentProfile, ProfileConflict } from "../contracts/profiles.ts";
+import { CurrentProfile, ProfileConflict, ProfileNotFound } from "../contracts/profiles.ts";
 import type { ProfileId } from "../contracts/shared.ts";
 import { validateSelection } from "./selection.ts";
 import type { Listings, ToolListing } from "./listings.ts";
@@ -346,6 +352,23 @@ function invocation(
     ),
   }).pipe(Effect.mapError(() => new StorageError()));
 }
+
+/**
+ * Check failures that are answers: the saved call's app, deployment, profile or accounts are now
+ * missing, inactive or different. Anything else, such as storage failing, answers nothing.
+ */
+const isContextChange = Schema.is(
+  Schema.Union([
+    AppNotFound,
+    AppNotDeployed,
+    DeploymentNotFound,
+    ProfileNotFound,
+    ProfileConflict,
+    AccountNotFound,
+    AccountSelectionInvalid,
+    AccountRequired,
+  ]),
+);
 
 /** A failure the app runtime reports for a call. */
 type CallError = Effect.Error<ReturnType<Runtime["call"] | Runtime["query"] | Runtime["mutate"]>>;
@@ -1040,6 +1063,20 @@ export const makeTools = (
                   ),
                   Effect.result,
                 );
+                // A failed read shows nothing about the context: only an answer that differs does.
+                if (Result.isFailure(checked) && !isContextChange(checked.failure)) {
+                  yield* Effect.annotateCurrentSpan({
+                    "executor.outcome": "failed",
+                    "error.type": checked.failure._tag,
+                  });
+                  return {
+                    status: "failed",
+                    requestId: input.requestId,
+                    reason: "execution-failed",
+                    error: checked.failure,
+                    context: "unconfirmed",
+                  } satisfies ToolResumeResult;
+                }
                 if (
                   Result.isFailure(checked) ||
                   !Schema.toEquivalence(ToolInvocation)(saved, checked.success.current)
@@ -1062,55 +1099,90 @@ export const makeTools = (
                   const context = yield* resolve(state, resolveAccount, lifecycle).pipe(
                     Effect.withSpan("sdk.accounts.resolve"),
                   );
-                  const kind = yield* kindOf(state, context, saved.tool, saved.kind);
-                  let toolError = false;
-                  const execute = (context: InvocationContext) =>
-                    Effect.suspend(() => {
-                      toolError = false;
-                      return runtime.call({
-                        app: saved.app,
-                        ...(workflows === undefined ? {} : { workflowControls: workflows(state) }),
-                        build: state.deployment.build,
-                        database: ownsDatabase(state.deployment.requirements),
-                        ...context,
-                        tool: saved.tool,
-                        ...(kind === undefined ? {} : { kind }),
-                        input: originalInput,
-                        approval: { tool: saved.tool, input: saved.input },
-                        ...(options?.elicitation === undefined
-                          ? {}
-                          : { elicitation: options.elicitation }),
-                      });
-                    }).pipe(
-                      Effect.provideService(ToolResultObservation, {
-                        failed: () => {
-                          toolError = true;
-                        },
-                      }),
-                      Effect.result,
+                  // Set by the host when it hands this call's work to the app's code, as for a call.
+                  let enteredApp = false;
+                  // As for a call, every failure from here passes through `callFailure` once, so a
+                  // resumed call that may write reports what it failed with as possibly written.
+                  return yield* Effect.gen(function* () {
+                    const kind = yield* kindOf(state, context, saved.tool, saved.kind);
+                    let toolError = false;
+                    const execute = (context: InvocationContext) =>
+                      Effect.suspend(() => {
+                        toolError = false;
+                        return runtime.call({
+                          app: saved.app,
+                          ...(workflows === undefined
+                            ? {}
+                            : { workflowControls: workflows(state) }),
+                          build: state.deployment.build,
+                          database: ownsDatabase(state.deployment.requirements),
+                          ...context,
+                          tool: saved.tool,
+                          ...(kind === undefined ? {} : { kind }),
+                          input: originalInput,
+                          approval: { tool: saved.tool, input: saved.input },
+                          ...(options?.elicitation === undefined
+                            ? {}
+                            : { elicitation: options.elicitation }),
+                        });
+                      }).pipe(
+                        Effect.provideService(ToolResultObservation, {
+                          failed: () => {
+                            toolError = true;
+                          },
+                        }),
+                        Effect.result,
+                      );
+                    // As for a call, the saved (caller's) kind decides whether a refused call is
+                    // repeated; the catalog's only sets the dispatched kind.
+                    const { result, renewal } = yield* executeRenewing(
+                      state,
+                      context,
+                      saved.kind,
+                      execute,
                     );
-                  // As for a call, the saved (caller's) kind decides whether a refused call is
-                  // repeated; the catalog's only sets the dispatched kind.
-                  const { result } = yield* executeRenewing(state, context, saved.kind, execute);
-                  if (Result.isFailure(result)) return yield* Effect.fail(result.failure);
-                  const value = result.success;
-                  if (toolError)
-                    yield* Effect.annotateCurrentSpan({
-                      "executor.outcome": "failed",
-                      "error.type": "McpToolError",
-                    });
-                  return {
-                    status: "completed" as const,
-                    value,
-                    ...(toolError ? { toolError: true as const } : {}),
-                  };
+                    if (Result.isFailure(result))
+                      return yield* Effect.fail(
+                        runtimeFailure(
+                          { app: saved.app, deployment: saved.deployment, tool: saved.tool },
+                          state,
+                          renewal,
+                        )(result.failure),
+                      );
+                    const value = result.success;
+                    if (toolError)
+                      yield* Effect.annotateCurrentSpan({
+                        "executor.outcome": "failed",
+                        "error.type": "McpToolError",
+                      });
+                    return {
+                      status: "completed" as const,
+                      value,
+                      ...(toolError ? { toolError: true as const } : {}),
+                    };
+                  }).pipe(
+                    Effect.mapError((failure) =>
+                      failure._tag === "OAuthReconnectRequired" ||
+                      failure._tag === "OAuthRenewalFailed" ||
+                      failure._tag === "AccountRequired"
+                        ? failure
+                        : callFailure(saved.kind, enteredApp)(failure),
+                    ),
+                    Effect.provideService(AppCodeEntered, {
+                      entered: () => {
+                        enteredApp = true;
+                      },
+                    }),
+                  );
                 }).pipe(
-                  Effect.catch(() =>
+                  // The request is consumed, so its caller receives the call's own failure.
+                  Effect.catch((error) =>
                     Effect.succeed({
                       status: "failed" as const,
                       requestId: input.requestId,
                       reason: "execution-failed" as const,
-                    }),
+                      error,
+                    } satisfies ToolResumeResult),
                   ),
                 );
               }),
