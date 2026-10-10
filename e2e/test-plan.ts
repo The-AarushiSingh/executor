@@ -5108,6 +5108,17 @@ export const scenarios = plan({
       ),
     },
   },
+  mcpExecuteApprovalSize: {
+    fixtures: "actors",
+    file: "mcp-execute-failures.spec.ts",
+    title:
+      "MCP approvals show exact arguments wherever they fit, shorten the saved prompt, run once approved and refuse requests too large to return with their size",
+    targets: {
+      "self-host": scheduled,
+      cloud: scheduled,
+      local: na("Hosted self-host covers the shared execution driver."),
+    },
+  },
   mcpExecuteServerRefused: {
     fixtures: "actors",
     file: "mcp-execute-failures.spec.ts",

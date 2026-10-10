@@ -222,7 +222,11 @@ function ApprovalForm({
         </h1>
       </header>
       <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted p-4 font-sans text-sm">
-        {request.elicitation.message}
+        {/* An approval shows the exact call it runs. Its saved prompt, which MCP clients are
+            sent, shortens long arguments. */}
+        {request.status === "approval-required"
+          ? `Approve ${tool}?\n\nArguments:\n${JSON.stringify(request.invocation.input, null, 2)}`
+          : request.elicitation.message}
       </pre>
       {Object.entries(schema.properties).map(([name, field]) => (
         <label key={name} className="block space-y-2 text-sm font-medium">

@@ -208,7 +208,7 @@ export const makeMcp = (options: McpOptions) =>
                         caller.pipe(
                           Effect.flatMap(({ id, sessionId }) =>
                             executions
-                              .execute(id, options.backend, code)
+                              .execute(id, options.backend, code, "result")
                               .pipe(
                                 Effect.flatMap((result) => withLink(result, sessionId, delivery)),
                               ),
@@ -249,7 +249,9 @@ export const makeMcp = (options: McpOptions) =>
                     McpToolkit.toLayer({
                       execute: ({ code }) =>
                         caller.pipe(
-                          Effect.flatMap(({ id }) => executions.execute(id, options.backend, code)),
+                          Effect.flatMap(({ id }) =>
+                            executions.execute(id, options.backend, code, "result"),
+                          ),
                           observeExecution("mcp.execute"),
                         ),
                       resume: (input) =>

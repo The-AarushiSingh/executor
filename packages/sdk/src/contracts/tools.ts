@@ -1397,7 +1397,10 @@ export const ToolCompleted = Schema.Struct({
   value: Json,
   toolError: Schema.optionalKey(Schema.Literal(true)),
 });
-/** Pending call plus the framework's MCP confirmation form. The SDK does not collect the response. */
+/**
+ * Pending call plus the MCP confirmation form the SDK builds from it, which shortens long arguments.
+ * The SDK does not collect the response.
+ */
 export const ToolPending = Schema.Struct({
   status: Schema.Literal("approval-required"),
   requestId: ApprovalRequestId,

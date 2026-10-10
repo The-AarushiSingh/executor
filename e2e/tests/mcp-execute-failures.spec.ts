@@ -624,6 +624,50 @@ export default defineApp({ accounts: {} }, async () => ({ tools: router({
   remove: mutation({ input: object({ id: string() }), approval: () => "denied" }, async () => "removed"),
 }) }));`;
 
+// `publish` needs approval for every call and records each run, so `runs` shows which calls ran.
+// `ask` asks the person a question too large for any execute result, and reports how that failed.
+const publishAppFiles = [
+  {
+    path: "migrations/0001_runs.sql",
+    content: "CREATE TABLE runs (title TEXT NOT NULL, length INTEGER NOT NULL);\n",
+  },
+  {
+    path: "index.ts",
+    content: `import { defineApp, mutation, query, object, string, router } from "apps";
+import { always } from "apps/operations/approval";
+export default defineApp({ accounts: {} }, async () => ({ tools: router({
+  publish: mutation({ input: object({ title: string(), body: string() }), approval: always() }, async ({ sql }, { title, body }) => {
+    sql.exec("INSERT INTO runs (title, length) VALUES (?, ?)", title, body.length);
+    return { title, length: body.length };
+  }),
+  runs: query({ input: object({}) }, async ({ sql }) => sql.exec("SELECT title, length FROM runs ORDER BY rowid").toArray()),
+  ask: mutation({ input: object({}) }, async ({ elicit }) => {
+    try {
+      await elicit({ mode: "form", message: "Q".repeat(70000), requestedSchema: { type: "object", properties: {} } });
+      return { asked: true };
+    } catch (error) {
+      return { reason: error.reason };
+    }
+  }),
+}) }));`,
+  },
+  appsManifest,
+];
+
+/** A pending approval with the arguments it binds and the prompt a person reviews. */
+const PublishPending = Schema.Struct({
+  status: Schema.Literal("approval-required"),
+  requestId: Schema.String,
+  invocation: Schema.Struct({
+    tool: Schema.String,
+    input: Schema.Struct({ title: Schema.String, body: Schema.String }),
+  }),
+  elicitation: Schema.Struct({ message: Schema.String }),
+});
+const LinkedPending = Schema.Struct({ ...PublishPending.fields, approvalUrl: Schema.String });
+/** The last characters of a long argument, which a shortened prompt would hide. */
+const ending = "END-OF-THE-BODY";
+
 /** The recovery a caught tool error carries as JSON, as an agent program reads it. */
 const CaughtRecovery = Schema.fromJsonString(
   Schema.Struct({
@@ -809,7 +853,13 @@ const hostedAppFiles = (
     const client = yield* mcp.connect(key.key, name.toLowerCase().replaceAll(" ", "-"), {
       organization: actors.organization.id,
     });
-    return { client, slug: app.slug, id: app.id, path: `${prefix}/apps/${app.id}` };
+    return {
+      client,
+      key: key.key,
+      slug: app.slug,
+      id: app.id,
+      path: `${prefix}/apps/${app.id}`,
+    };
   });
 
 layer(HostedLive, { excludeTestServices: true })("Hosted MCP execute failures", (it) => {
@@ -1206,6 +1256,266 @@ return messages;`,
           `The approval policy in the app’s code denied this call to “remove”. ${unknownOutcomeAction}`,
         );
         yield* browser.checkpoint("Denied tool call in the dashboard");
+      }).pipe(Effect.provide(McpClient.layer)),
+    ),
+  );
+  it.effect(scenarios.mcpExecuteApprovalSize.title, (context) =>
+    withHostedCase(
+      context,
+      Effect.gen(function* () {
+        const actors = yield* Actors,
+          mcp = yield* McpClient,
+          browser = yield* Browser,
+          evidence = yield* Evidence;
+        const { client, key, slug } = yield* hostedAppFiles("Large approval", publishAppFiles);
+        const app = `tools[${JSON.stringify(slug)}]`;
+        // `body` is a JavaScript expression evaluated by the program.
+        const publish = (title: string, body: string) =>
+          `${app}.publish({ title: ${JSON.stringify(title)}, body: ${body} })`;
+        const ascii = (length: number) => `"A".repeat(${length})`;
+        const ended = (length: number) => `"A".repeat(${length}) + ${JSON.stringify(ending)}`;
+        const runs = (label: string, file: string) =>
+          Effect.gen(function* () {
+            const read = yield* executeOnce(client, label, `return await ${app}.runs({});`, file);
+            return (yield* Schema.decodeUnknownEffect(Completed)(read.structured)).execution.value;
+          });
+        const accept = (label: string, requestId: string, file: string) =>
+          Effect.gen(function* () {
+            const resumed = yield* client.use(label, (client, signal) =>
+              client.callTool(
+                { name: "resume", arguments: { requestId, response: { action: "accept" } } },
+                undefined,
+                { signal, timeout: 55_000 },
+              ),
+            );
+            yield* evidence.json(file, resumed.structuredContent);
+            return (yield* Schema.decodeUnknownEffect(Completed)(resumed.structuredContent))
+              .execution;
+          });
+
+        // 40 KB of arguments: well inside the 64 KiB execute result, but not when it holds them twice.
+        const parked = yield* executeOnce(
+          client,
+          "Ask approval for a call with 40 KB of arguments",
+          `return await ${publish("Weekly report", ascii(40_000))};`,
+          "large-approval.json",
+        );
+        expect(parked.structured).toMatchObject({ status: "approval-required" });
+        const pending = yield* Schema.decodeUnknownEffect(PublishPending)(parked.structured);
+        // The request binds the exact arguments; its saved prompt shortens the long value, saying
+        // how long it is.
+        expect(pending.invocation.input).toEqual({
+          title: "Weekly report",
+          body: "A".repeat(40_000),
+        });
+        expect(pending.elicitation.message).toContain("Approve publish?");
+        expect(pending.elicitation.message).toContain('"title": "Weekly report"');
+        expect(pending.elicitation.message).toContain(`"${"A".repeat(100)}`);
+        expect(pending.elicitation.message).toContain('"… (40000 characters)');
+        expect(pending.elicitation.message).toContain(
+          "Approving runs the call with the complete arguments",
+        );
+        expect(pending.elicitation.message.length).toBeLessThan(5_000);
+        expect(
+          yield* accept(
+            "Approve the call with 40 KB of arguments",
+            pending.requestId,
+            "large-approval-resumed.json",
+          ),
+        ).toMatchObject({ ok: true, value: { title: "Weekly report", length: 40_000 } });
+
+        // 60 KB of ASCII still fits once, so it is offered and runs.
+        const boundary = yield* executeOnce(
+          client,
+          "Ask approval for a call with 60 KB of arguments",
+          `return await ${publish("Boundary report", ascii(60_000))};`,
+          "boundary-approval.json",
+        );
+        const near = yield* Schema.decodeUnknownEffect(PublishPending)(boundary.structured);
+        expect(near.invocation.input.body).toHaveLength(60_000);
+        expect(
+          yield* accept(
+            "Approve the call with 60 KB of arguments",
+            near.requestId,
+            "boundary-approval-resumed.json",
+          ),
+        ).toMatchObject({ ok: true, value: { title: "Boundary report", length: 60_000 } });
+
+        // Arguments the execute result cannot hold once are refused with the request's size and
+        // the limit, not only the error's name.
+        const refusal =
+          /^ApprovalTooLarge \(HTTP 413\): The approval request for “publish” is (\d+) bytes, over the 65536-byte limit for an approval request, so Executor did not ask for approval and will not run the call\. Recovery: Make the arguments smaller/u;
+        const refusedBytes = (label: string, body: string, file: string) =>
+          Effect.gen(function* () {
+            const refused = yield* executeOnce(
+              client,
+              label,
+              `return await ${publish("Oversized report", body)};`,
+              file,
+            );
+            const { error } = (yield* Schema.decodeUnknownEffect(Failed)(refused.structured))
+              .execution;
+            expect(error.response).toEqual({ code: "ApprovalTooLarge", status: 413 });
+            const measured = refusal.exec(error.message);
+            if (measured === null) return yield* Effect.die(`Unexpected refusal: ${error.message}`);
+            return { bytes: Number(measured[1]), structured: refused.structured };
+          });
+        const refused = yield* refusedBytes(
+          "Ask approval for a call with 70 KB of arguments",
+          ascii(70_000),
+          "oversized-approval.json",
+        );
+        expect(refused.bytes).toBeGreaterThan(70_000);
+        expect(refused.bytes).toBeLessThan(75_000);
+        // 25,000 three-byte characters: short in characters, but over the limit in UTF-8 bytes.
+        const multibyte = yield* refusedBytes(
+          "Ask approval for a call with 25,000 euro signs",
+          `"€".repeat(25_000)`,
+          "oversized-multibyte-approval.json",
+        );
+        expect(multibyte.bytes).toBeGreaterThan(75_000);
+        const caught = yield* executeOnce(
+          client,
+          "Catch the oversized approval and read its recovery",
+          `try { await ${publish("Oversized report", ascii(70_000))}; return "ran"; } catch (error) { return error.message; }`,
+          "oversized-approval-caught.json",
+        );
+        const recovery = yield* Schema.decodeUnknownEffect(CaughtRecovery)(
+          (yield* Schema.decodeUnknownEffect(Completed)(caught.structured)).execution.value,
+        );
+        expect(recovery).toMatchObject({ code: "ApprovalTooLarge", status: 413 });
+        expect(recovery.recovery.instructions).toContain(
+          "Calling it again with the same arguments fails the same way",
+        );
+        expect(recovery.recovery.instructions).toContain("a URL");
+        const uncaught = yield* Schema.decodeUnknownEffect(UncaughtRecovery)(refused.structured);
+        expect(uncaught.execution.error.response.recovery).toEqual(recovery.recovery);
+        // None of the refused calls ran.
+        expect(yield* runs("Read the runs after the refusals", "runs-after-refusal.json")).toEqual([
+          { title: "Weekly report", length: 40_000 },
+          { title: "Boundary report", length: 60_000 },
+        ]);
+
+        // An app's own question too large to return reaches the app as an invalid request, and
+        // the program finishes instead of waiting for an answer.
+        const asked = yield* executeOnce(
+          client,
+          "Ask a question larger than an execute result",
+          `return await ${app}.ask({});`,
+          "oversized-question.json",
+        );
+        expect(
+          (yield* Schema.decodeUnknownEffect(Completed)(asked.structured)).execution,
+        ).toMatchObject({ ok: true, value: { reason: "invalid-request" } });
+
+        // The browser review shows the exact arguments, so its end is visible, and approving
+        // there runs the call.
+        yield* browser.login(actors.owner);
+        const linked = yield* mcp.connect(key, "large-approval-browser", {
+          organization: actors.organization.id,
+          mode: "browser",
+        });
+        const reviewed = yield* linked.use(
+          "Ask approval in the browser for a call with 40 KB of arguments",
+          (client, signal) =>
+            client.callTool(
+              {
+                name: "execute",
+                arguments: { code: `return await ${publish("Browser report", ended(40_000))};` },
+              },
+              undefined,
+              { signal, timeout: 55_000 },
+            ),
+        );
+        yield* evidence.json("browser-large-approval.json", reviewed.structuredContent);
+        const link = yield* Schema.decodeUnknownEffect(LinkedPending)(reviewed.structuredContent);
+        expect(link.elicitation.message).not.toContain(ending);
+        const url = new URL(link.approvalUrl);
+        expect(
+          yield* browser.use("The review page shows the end of the long argument", (page) =>
+            page
+              .goto(`${url.pathname}${url.search}`)
+              .then(() =>
+                page.getByRole("heading", { name: "Review tool request", exact: true }).waitFor(),
+              )
+              .then(() => page.getByText(ending, { exact: false }).count()),
+          ),
+        ).toBe(1);
+        yield* browser.checkpoint("Review of a call with 40 KB of arguments");
+        yield* browser.use("Approve the call in the browser", (page) =>
+          page
+            .getByRole("button", { name: "Approve", exact: true })
+            .click()
+            .then(() => page.getByText("Response saved", { exact: true }).waitFor()),
+        );
+        const collected = yield* linked.use(
+          "Collect the browser approval through resume",
+          (client, signal) =>
+            client.callTool(
+              { name: "resume", arguments: { requestId: link.requestId } },
+              undefined,
+              { signal, timeout: 55_000 },
+            ),
+        );
+        yield* evidence.json("browser-large-approval-resumed.json", collected.structuredContent);
+        expect(
+          (yield* Schema.decodeUnknownEffect(Completed)(collected.structuredContent)).execution,
+        ).toMatchObject({ ok: true, value: { title: "Browser report", length: 40_015 } });
+
+        // A native client is sent only the prompt. It shows the exact arguments when they fit an
+        // execute result, and the shortened prompt above that, so larger calls are approved too.
+        const native = yield* mcp.connect(key, "large-approval-native", {
+          organization: actors.organization.id,
+          mode: "native",
+        });
+        const nativeCall = (label: string, title: string, body: string, file: string) =>
+          Effect.gen(function* () {
+            const approved = yield* native.use(label, (client, signal) =>
+              client.callTool(
+                { name: "execute", arguments: { code: `return await ${publish(title, body)};` } },
+                undefined,
+                { signal, timeout: 55_000 },
+              ),
+            );
+            yield* evidence.json(file, approved.structuredContent);
+            return (yield* Schema.decodeUnknownEffect(Completed)(approved.structuredContent))
+              .execution;
+          });
+        expect(
+          yield* nativeCall(
+            "Approve a call with 40 KB of arguments shown in full",
+            "Native exact report",
+            ended(40_000),
+            "native-exact-approval.json",
+          ),
+        ).toMatchObject({ ok: true, value: { title: "Native exact report", length: 40_015 } });
+        expect(
+          yield* nativeCall(
+            "Approve a call with 100 KB of arguments in the client's prompt",
+            "Native report",
+            ascii(100_000),
+            "native-large-approval.json",
+          ),
+        ).toMatchObject({ ok: true, value: { title: "Native report", length: 100_000 } });
+        const [exactPrompt, shortenedPrompt] = yield* native.prompts;
+        yield* evidence.json("native-prompts.json", {
+          lengths: (yield* native.prompts).map((prompt) => prompt.length),
+        });
+        expect(yield* native.elicitationCount).toBe(2);
+        expect(exactPrompt).toContain(`Arguments:\n{\n  "title": "Native exact report"`);
+        expect(exactPrompt).toContain(`${"A".repeat(1_000)}${ending}"`);
+        expect(shortenedPrompt).toContain("Approving runs the call with the complete arguments");
+        expect(shortenedPrompt).toContain('"… (100000 characters)');
+        expect(shortenedPrompt?.length).toBeLessThan(5_000);
+        expect(
+          yield* runs("Read the runs after the native approvals", "runs-after-native.json"),
+        ).toEqual([
+          { title: "Weekly report", length: 40_000 },
+          { title: "Boundary report", length: 60_000 },
+          { title: "Browser report", length: 40_015 },
+          { title: "Native exact report", length: 40_015 },
+          { title: "Native report", length: 100_000 },
+        ]);
       }).pipe(Effect.provide(McpClient.layer)),
     ),
   );

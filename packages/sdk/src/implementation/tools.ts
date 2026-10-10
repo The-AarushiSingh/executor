@@ -967,13 +967,13 @@ export const makeTools = (
               ...(toolError ? { toolError: true as const } : {}),
             };
           }
+          // The app reports the decoded input it asks approval for; its prompt is not used.
           if (Schema.is(HostToolApprovalRequired)(result.failure)) {
             // The request saves the caller's kind, so its pending response and its resumption
             // treat a call that named none as one that may write.
             return yield* approvals.save(
               yield* invocation(state, parsed.tool, named, result.failure.input),
               args,
-              result.failure.elicitation,
               options?.issuer,
             );
           }

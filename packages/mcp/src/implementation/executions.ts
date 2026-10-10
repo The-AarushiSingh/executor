@@ -10,6 +10,7 @@ import {
 } from "@executor-js/sdk/core";
 import {
   defaultElicitationLimits,
+  exactApprovalElicitation,
   type ElicitationResponse,
   type ElicitationHandler,
 } from "apps/contracts";
@@ -30,6 +31,7 @@ import {
 } from "effect";
 import type { McpBackend } from "../contracts/backend.ts";
 import {
+  ApprovalTooLarge,
   defaultMcpRuntimeLimits,
   ElicitationRequestId,
   ElicitationResponseInvalid,
@@ -40,6 +42,7 @@ import {
   type ExecuteResult,
   type McpExecutionResult,
   type McpLimits,
+  type PendingInteraction,
 } from "../contracts/execute.ts";
 import type { BrowserApprovalView, BrowserApprovalAcknowledgement } from "../contracts/browser.ts";
 import { programScheduler } from "./program-scheduler.ts";
@@ -53,7 +56,6 @@ import {
   type ExecutionProgress,
 } from "./execute.ts";
 
-class ApprovalTooLarge extends Schema.TaggedError<ApprovalTooLarge>()("ApprovalTooLarge", {}) {}
 class ApprovalDenied extends Schema.TaggedError<ApprovalDenied>()("ApprovalDenied", {}) {}
 class ApprovalCancelled extends Schema.TaggedError<ApprovalCancelled>()("ApprovalCancelled", {}) {}
 class McpExecutionFailed extends Schema.TaggedError<McpExecutionFailed>()(
@@ -79,6 +81,18 @@ const interactionTool = (call: {
     ? {}
     : { expectedProfileRevision: call.expectedProfileRevision }),
 });
+
+/**
+ * How a run's pending interactions reach a person, which decides what must fit the output budget.
+ * Model and browser delivery return the whole interaction as the execute result; browser delivery
+ * also adds its review link, a few hundred bytes the budget does not count. Native delivery sends
+ * only the prompt, as the client's own elicitation request.
+ */
+export type PendingTransport = "result" | "prompt";
+const jsonBytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+/** UTF-8 bytes of the JSON a transport sends for this interaction. */
+const sentBytes = (transport: PendingTransport, request: PendingInteraction) =>
+  jsonBytes(transport === "prompt" ? request.elicitation : request);
 
 type Operation = { readonly waiting: Set<InteractionId> };
 type Pending = {
@@ -109,6 +123,7 @@ type Event =
   | { readonly kind: "done"; readonly result: typeof ExecuteResult.Type };
 type Run = {
   readonly id: string;
+  readonly transport: PendingTransport;
   readonly scheduling: ReturnType<typeof programScheduler>;
   readonly caller: string;
   readonly scope: Scope.Closeable;
@@ -228,11 +243,6 @@ export const makeExecutions = (
     const record = (pending: Pending) =>
       Effect.gen(function* () {
         if (pending.run.closed || expired(pending.run)) return yield* new ApprovalUnavailable();
-        if (
-          new TextEncoder().encode(JSON.stringify(pending.request)).byteLength >
-          limits.maxOutputBytes
-        )
-          return yield* new ApprovalTooLarge();
         pending.run.pending.set(pending.request.requestId, pending);
         requests.set(pending.request.requestId, pending);
         yield* wake(pending.run);
@@ -253,6 +263,16 @@ export const makeExecutions = (
             elicitation: form.request,
             expiresAt: (yield* Clock.currentTimeMillis) + defaultElicitationLimits.timeoutMs,
           };
+          // The app's question cannot reach anyone, so its request is invalid. The app learns only
+          // that; the span keeps the size, for operators.
+          const bytes = sentBytes(run.transport, request);
+          if (bytes > limits.maxOutputBytes) {
+            yield* Effect.annotateCurrentSpan({
+              "executor.elicitation.bytes": bytes,
+              "executor.elicitation.limit": limits.maxOutputBytes,
+            });
+            return yield* new ElicitationFailed({ reason: "invalid-request" });
+          }
           const pending: Pending = {
             kind: "input",
             browserAnswer: yield* Deferred.make<ElicitationResponse | undefined>(),
@@ -265,7 +285,8 @@ export const makeExecutions = (
           };
           operation.waiting.add(request.requestId);
           return yield* record(pending).pipe(
-            Effect.mapError(() => new ElicitationFailed({ reason: "invalid-request" })),
+            // Recording fails only once the run has ended.
+            Effect.mapError(() => new ElicitationFailed({ reason: "unavailable" })),
             Effect.andThen(Deferred.await(response)),
             Effect.raceFirst(
               Effect.callback<never>((resume) => {
@@ -301,6 +322,46 @@ export const makeExecutions = (
             Effect.sync(() => run.operations.delete(operation)).pipe(Effect.andThen(wake(run))),
           ),
           Effect.forkIn(run.scope),
+        );
+      });
+
+    /**
+     * The approval request as `run` sends it. A native client is sent only the prompt, so it shows
+     * the exact arguments whenever that prompt fits the budget, and the saved shortened one
+     * otherwise. A request over the budget is never offered: the saved call is cancelled, so it can
+     * never run, and the call fails with the request's size.
+     */
+    const offer = (
+      run: Run,
+      backend: McpBackend<Error>,
+      saved: typeof ToolPending.Type,
+    ): Effect.Effect<typeof ToolPending.Type, ApprovalTooLarge> =>
+      Effect.gen(function* () {
+        const exact =
+          run.transport === "prompt"
+            ? exactApprovalElicitation(
+                saved.invocation.tool,
+                saved.invocation.input,
+                limits.maxOutputBytes,
+              )
+            : undefined;
+        const request =
+          exact !== undefined && jsonBytes(exact) <= limits.maxOutputBytes
+            ? { ...saved, elicitation: exact }
+            : saved;
+        const bytes = sentBytes(run.transport, request);
+        if (bytes <= limits.maxOutputBytes) return request;
+        // Its ID never leaves the host, but consuming it means no answer could ever run it.
+        yield* Effect.ignore(backend.resumeInvocation(saved, { action: "cancel" }), {
+          log: "Warn",
+          message: "Cancelling an oversized approval request failed",
+        });
+        return yield* Effect.fail(
+          new ApprovalTooLarge({
+            tool: saved.invocation.tool,
+            bytes,
+            limit: limits.maxOutputBytes,
+          }),
         );
       });
 
@@ -368,6 +429,11 @@ export const makeExecutions = (
                         "executor.tool.name": input.tool,
                       },
                     }),
+                    Effect.flatMap((result): Effect.Effect<ToolCallResult, ApprovalTooLarge> =>
+                      result.status === "completed"
+                        ? Effect.succeed(result)
+                        : offer(run, backend, result),
+                    ),
                   ),
               (result, response) => {
                 if (result.status === "completed")
@@ -548,6 +614,7 @@ export const makeExecutions = (
         caller: string,
         backend: McpBackend<Error>,
         code: string,
+        transport: PendingTransport,
       ): Effect.Effect<McpExecutionResult, ExecutionRejected> =>
         Effect.gen(function* () {
           const admitted = () => runs.size + closing.size < defaultMcpRuntimeLimits.maxExecutions;
@@ -557,6 +624,7 @@ export const makeExecutions = (
           }
           const run: Run = {
             id: crypto.randomUUID(),
+            transport,
             caller,
             scheduling: programScheduler(scheduler),
             scope: yield* Scope.make(),

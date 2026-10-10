@@ -5,6 +5,7 @@ import { HttpServerRequest } from "effect/http";
 import { McpSchema, Tool as McpTool } from "effect/ai";
 import { ApiErrorResponse, ElicitationResponse } from "apps/contracts";
 import { UserFacingError } from "@executor-js/utils/user-facing-error";
+import { ToolName } from "@executor-js/sdk/core";
 import { InteractionId, PendingInteraction, ElicitationResponseInvalid } from "./interactions.ts";
 export * from "./interactions.ts";
 import { NativeElicitationFailed } from "./elicitation.ts";
@@ -80,6 +81,31 @@ export const AppDiscoveryTimedOut = UserFacingError.define({
     },
   }),
 });
+
+/**
+ * A call that needs approval made a request larger than the output budget, measured on what its
+ * delivery sends: the whole request as an execute result, or only the prompt a native client
+ * shows. Executor never offers it and cancels the saved call, so no one is asked to approve a call
+ * whose request did not reach them and it can never run. App code asks for approval after it has
+ * run, so the copy says what Executor did with the call, never that the tool did not run.
+ */
+export const ApprovalTooLarge = UserFacingError.define({
+  tag: "ApprovalTooLarge",
+  status: 413,
+  fields: { tool: ToolName, bytes: Schema.Int, limit: Schema.Int },
+  recorded: ({ bytes, limit }) =>
+    `Approval request of ${bytes} bytes is over the ${limit}-byte limit`,
+  presentation: ({ tool, bytes, limit }) => ({
+    title: "Approval request too large",
+    description: `The approval request for “${tool}” is ${bytes} bytes, over the ${limit}-byte limit for an approval request, so Executor did not ask for approval and will not run the call.`,
+    recovery: {
+      action:
+        "Make the arguments smaller, for example by passing large content as a URL or an uploaded file, then call the tool again.",
+      instructions: `An approval request carries the call's arguments and must fit in ${limit} bytes of JSON; this one is ${bytes}. Calling it again with the same arguments fails the same way, and changing unrelated arguments does not help. Pass large content by reference instead of inline: a URL, an upload or file ID the tool accepts, or several smaller calls if the tool supports that. Code that ran before approval was requested, in this tool or earlier in the program, may already have made changes; check current state with a safe read before calling again.`,
+    },
+  }),
+});
+export type ApprovalTooLarge = typeof ApprovalTooLarge.Type;
 
 /** Generated code is bounded before it reaches the parser. */
 export const ExecuteInput = Schema.Struct({
