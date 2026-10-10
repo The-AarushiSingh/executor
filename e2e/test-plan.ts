@@ -2339,6 +2339,164 @@ export const scenarios = plan({
       local: na("Local runs apps through the same workerd runner and outbound as self-host."),
     },
   },
+  credentialHostsRestart: {
+    fixtures: "actors",
+    file: "credential-hosts.spec.ts",
+    title:
+      "a credential handle app code keeps still opens after a restart with the same encryption key",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Restarts a runner-owned product; Cloud keeps its handle secret across deploys."),
+      local: na("Local derives the handle key the same way through the same workerd runner."),
+    },
+  },
+  credentialPlacementMatched: {
+    fixtures: "actors",
+    file: "credential-placement.spec.ts",
+    title: "placed credentials are substituted only where a request matches their template exactly",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Uses a loopback service; Cloud app Workers reach only public addresses."),
+      local: na("Local runs apps through the same workerd runner and outbound as self-host."),
+    },
+  },
+  credentialPlacementDeclared: {
+    fixtures: "actors",
+    file: "credential-placement.spec.ts",
+    title: "a provider's credential placements are checked when it is declared",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Declarations are evaluated by the same framework on every host."),
+      local: na("Declarations are evaluated by the same framework on every host."),
+    },
+  },
+  credentialOutboundOwn: {
+    fixtures: "actors",
+    file: "credential-placement.spec.ts",
+    title:
+      "the outbound never sends a credential with TRACE, and its own errors never quote a substituted value",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Uses a loopback service; Cloud app Workers reach only public addresses."),
+      local: na("Local runs apps through the same workerd runner and outbound as self-host."),
+    },
+  },
+  credentialManagedOffered: {
+    fixtures: "actors",
+    file: "credential-placement.spec.ts",
+    title:
+      "the operator's OAuth client is offered only to providers on its server whose scopes it allows",
+    targets: {
+      "self-host": scheduled,
+      cloud: na(
+        "Restarts a runner-owned product with the operator's client; managed Cloud has no per-case operator settings.",
+      ),
+      local: na("Local products have no operator OAuth clients."),
+    },
+  },
+  credentialManagedPlaced: {
+    fixtures: "actors",
+    file: "credential-placement.spec.ts",
+    title:
+      "a token from the operator's OAuth client goes only in the operator's header, to its hosts, and nowhere else in a request",
+    targets: {
+      "self-host": scheduled,
+      cloud: na(
+        "Restarts a runner-owned product with the operator's client; managed Cloud has no per-case operator settings.",
+      ),
+      local: na("Local products have no operator OAuth clients."),
+    },
+  },
+  credentialManagedKept: {
+    fixtures: "actors",
+    file: "credential-placement.spec.ts",
+    title:
+      "app updates, a provider's own placements and older builds cannot widen where a token from the operator's OAuth client goes",
+    targets: {
+      "self-host": scheduled,
+      cloud: na(
+        "Restarts a runner-owned product with the operator's client; managed Cloud has no per-case operator settings.",
+      ),
+      local: na("Local products have no operator OAuth clients."),
+    },
+  },
+  credentialManagedEndpoints: {
+    fixtures: "actors",
+    file: "credential-placement.spec.ts",
+    title:
+      "the operator's OAuth client signs in, renews and revokes only at the operator's endpoints",
+    targets: {
+      "self-host": scheduled,
+      cloud: na(
+        "Restarts a runner-owned product with the operator's client; managed Cloud has no per-case operator settings.",
+      ),
+      local: na("Local products have no operator OAuth clients."),
+    },
+  },
+  credentialManagedHostPatterns: {
+    fixtures: "actors",
+    file: "credential-placement.spec.ts",
+    title: "the operator's wildcard hosts admit exactly the provider hosts they match",
+    targets: {
+      "self-host": scheduled,
+      cloud: na(
+        "Restarts a runner-owned product with the operator's client; managed Cloud has no per-case operator settings.",
+      ),
+      local: na("Local products have no operator OAuth clients."),
+    },
+  },
+  credentialManagedReconnect: {
+    fixtures: "actors",
+    file: "credential-placement.spec.ts",
+    title:
+      "a reconnect to the operator's client during a renewal is read as managed by calls, checks and retries already running",
+    targets: {
+      "self-host": scheduled,
+      cloud: na(
+        "Restarts a runner-owned product with the operator's client; managed Cloud has no per-case operator settings.",
+      ),
+      local: na("Local products have no operator OAuth clients."),
+    },
+  },
+  credentialManagedScopes: {
+    fixtures: "actors",
+    file: "credential-placement.spec.ts",
+    title:
+      "the operator's OAuth client keeps no grant holding a scope outside its allowed scopes, read with the server's granted-scope separator",
+    targets: {
+      "self-host": scheduled,
+      cloud: na(
+        "Restarts a runner-owned product with the operator's client; managed Cloud has no per-case operator settings.",
+      ),
+      local: na("Local products have no operator OAuth clients."),
+    },
+  },
+  credentialManagedSettingsInvalid: {
+    fixtures: "actors",
+    file: "credential-placement.spec.ts",
+    title:
+      "invalid operator OAuth client settings stop the product and name each client field and why, never its value",
+    targets: {
+      "self-host": scheduled,
+      cloud: na(
+        "Cloud reads the same setting with the same parser; a deploy fails on it before any request.",
+      ),
+      local: na("Local products have no operator OAuth clients."),
+    },
+  },
+  credentialManagedCloud: {
+    fixtures: "actors",
+    file: "credential-placement.spec.ts",
+    title:
+      "Cloud's operator OAuth client signs in, and its outbound sends the token only in the operator's header",
+    targets: {
+      "self-host": na(
+        "Self-host scenarios above restart the product with the operator's client; this one proves Cloud's own configuration path.",
+      ),
+      cloud: managedCloud,
+      local: na("Local products have no operator OAuth clients."),
+    },
+  },
   appWorkerSharedContexts: {
     fixtures: "actors",
     file: "app-worker-reuse.spec.ts",
@@ -5924,7 +6082,8 @@ export const scenarios = plan({
   mcpLateRefreshReuse: {
     fixtures: "actors",
     file: "mcp-oauth-refresh.spec.ts",
-    title: "A rotated MCP refresh token replayed after the access-token hour ends every copy",
+    title:
+      "A rotated MCP refresh token replayed after the access-token hour is refused alone, and more than a day after its rotation ends every copy",
     targets: {
       "self-host": scheduled,
       cloud: na("Advances the wall clock of a runner-owned product process."),
