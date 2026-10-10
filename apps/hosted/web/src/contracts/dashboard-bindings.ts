@@ -9,6 +9,16 @@ import { HostedClient, catalogAtom } from "./api.ts";
 import { inventoryAtom } from "./organization.ts";
 import { acknowledgeApp, toolsAtom } from "./apps.ts";
 
+/** Minimal app the Add app "blank" path deploys; must include root index.ts. */
+const blankAppFiles = [
+  {
+    path: "index.ts",
+    content: `import { defineApp, router } from "apps";
+export default defineApp({ accounts: {} }, async () => ({ tools: router({}) }));
+`,
+  },
+] as const;
+
 /** A separate set of atom identities per organization prevents cross-organization cache reuse. */
 export const dashboardAtoms = Atom.family((organization: OrganizationReference) => ({
   inventory: Atom.map(
@@ -51,6 +61,14 @@ export const dashboardAtoms = Atom.family((organization: OrganizationReference) 
   importCustom: HostedClient.runtime.fn((input: CustomAppInput, get) =>
     Effect.flatMap(HostedClient, (client) =>
       client.apps.importCustom({ params: { organization }, payload: { source: input } }),
+    ).pipe(Effect.tap((saved) => Effect.sync(() => acknowledgeApp(get, organization, saved)))),
+  ),
+  createBlank: HostedClient.runtime.fn((input: { name: string }, get) =>
+    Effect.flatMap(HostedClient, (client) =>
+      client.apps.deploy({
+        params: { organization },
+        payload: { name: input.name, files: [...blankAppFiles] },
+      }),
     ).pipe(Effect.tap((saved) => Effect.sync(() => acknowledgeApp(get, organization, saved)))),
   ),
 }));
