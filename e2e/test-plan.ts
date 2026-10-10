@@ -638,6 +638,17 @@ export const scenarios = plan({
       local: na("Hosted API fixture; the runtime and collector are shared with Local."),
     },
   },
+  appCacheLimits: {
+    fixtures: "actors",
+    file: "app-cache-limits.spec.ts",
+    title:
+      "App cache shortens lifetimes past its retention and names the size limit a value exceeds",
+    targets: {
+      "self-host": scheduled,
+      cloud: scheduled,
+      local: na("Hosted app deploy and tool call routes."),
+    },
+  },
   appCache: {
     fixtures: "actors",
     file: "app-cache.spec.ts",
