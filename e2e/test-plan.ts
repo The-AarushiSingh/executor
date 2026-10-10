@@ -188,6 +188,50 @@ export const scenarios = plan({
       local: na("Local signs the CLI in with an API key, not a saved session."),
     },
   },
+  deviceLoginCli: {
+    fixtures: "actors",
+    file: "device-login.spec.ts",
+    title:
+      "The CLI signs in with a code typed on the device page when no browser opens, and keeps an ordinary session",
+    targets: {
+      cloud: scheduled,
+      "self-host": scheduled,
+      local: na("Local signs the CLI in with an API key, not a saved session."),
+    },
+  },
+  deviceLoginNoOsStore: {
+    fixtures: "actors",
+    file: "device-login.spec.ts",
+    title:
+      "Over SSH without an OS credential store, the CLI opens no browser, saves its session in a file only the user can read, and keeps working",
+    targets: {
+      cloud: scheduled,
+      "self-host": scheduled,
+      local: na("Local signs the CLI in with an API key, not a saved session."),
+    },
+  },
+  deviceLoginDenied: {
+    fixtures: "actors",
+    file: "device-login.spec.ts",
+    title:
+      "The CLI opens the device page with its code, and a denial there ends the CLI with that reason",
+    targets: {
+      cloud: scheduled,
+      "self-host": scheduled,
+      local: na("Local signs the CLI in with an API key, not a saved session."),
+    },
+  },
+  deviceAuthorizationGrant: {
+    fixtures: "actors",
+    file: "device-login.spec.ts",
+    title:
+      "Device authorization polls with RFC 8628 errors and redeems an approved code once for the chosen organization",
+    targets: {
+      cloud: scheduled,
+      "self-host": scheduled,
+      local: na("Local has no device verification page; its clients open a browser."),
+    },
+  },
   cloudRoleHostGrants: {
     fixtures: "actors",
     file: "cloud-role-hosts.spec.ts",
