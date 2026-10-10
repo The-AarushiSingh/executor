@@ -222,7 +222,9 @@ export const makeDeclarations = (options: {
      * `revalidate` marks a kept value that is not served once stale, even with background work:
      * the read evaluates first instead, so its caller never gets a value a refresh replaces moments
      * later. `live` evaluates without reading or writing kept results, for callers that act on the
-     * result, such as reconciling upstream webhook registrations.
+     * result, such as reconciling upstream webhook registrations. `refreshStale: false` serves a
+     * kept value of any age below the bound as it is, without `revalidate` or a background
+     * refresh; see `CatalogReadOptions`.
      */
     read: <E>(
       command: string,
@@ -233,6 +235,7 @@ export const makeDeclarations = (options: {
         readonly current?: (value: unknown) => Effect.Effect<boolean>;
         readonly revalidate?: (value: unknown) => boolean;
         readonly live?: boolean;
+        readonly refreshStale?: boolean;
       } = {},
     ) =>
       Effect.gen(function* () {
@@ -299,6 +302,14 @@ export const makeDeclarations = (options: {
             }
             const stale = age >= declarationFreshness.freshMillis;
             const background = options.background;
+            if (stale && policy.refreshStale === false) {
+              yield* authorize(state);
+              yield* Effect.annotateCurrentSpan({
+                "executor.declarations.cache": "stale",
+                "executor.declarations.age_ms": age,
+              });
+              return value;
+            }
             if (stale && background === undefined) {
               yield* Effect.annotateCurrentSpan("executor.declarations.cache", "expired");
               return yield* load;

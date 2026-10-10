@@ -147,7 +147,7 @@ export const hostedMcpBackend = Effect.gen(function* () {
         const { principal } = yield* subscriber;
         yield* (yield* sdk).events.unsubscribe({ ...key, principal });
       }).pipe((work) => observe("unsubscribeEvent", work)),
-    listSkills: (input) => observe("listSkills", listAppSkills(input), "read"),
+    listSkills: (input, options) => observe("listSkills", listAppSkills(input, options), "read"),
     readSkill: (input) => observe("readSkill", readAppSkill(input), "read"),
     authorizeElicitation: (input) =>
       Effect.gen(function* () {

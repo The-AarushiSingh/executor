@@ -35,9 +35,15 @@ import { WorkflowFailure, WorkflowRunId } from "apps/contracts";
 import { WorkflowBackendState, type WorkflowRuntime } from "../contracts/workflow-runtime.ts";
 import { type WorkerdAppApi } from "../contracts/workerd-host.ts";
 import { type BlobStorage } from "../contracts/blobs.ts";
+import {
+  EvaluatedCommandJson,
+  EvaluatedReplyJson,
+  type EvaluatedCommand,
+} from "@executor-js/app-data/evaluated";
 
 import { RuntimeBuildFailed, RuntimeProtocolFailed } from "../contracts/runtime.ts";
 import type { Executor } from "../contracts/executor.ts";
+import type { DurableDeclarations } from "../contracts/declarations.ts";
 import { runtimeAdapter } from "./runtime.ts";
 
 import { connectedWorkerdApps, workerdHostHandler } from "./workerd-client.ts";
@@ -129,7 +135,11 @@ export const workerdApps = (options: {
   /** The npm registry app builds resolve packages from. Defaults to the public registry. */
   readonly npmRegistry?: string;
 }): Effect.Effect<
-  { readonly runtime: ReturnType<typeof runtimeAdapter>; readonly workflows: WorkflowRuntime },
+  {
+    readonly runtime: ReturnType<typeof runtimeAdapter>;
+    readonly workflows: WorkflowRuntime;
+    readonly declarations: DurableDeclarations;
+  },
   RuntimeBuildFailed | WorkerdMigrationRequired | WorkflowFailure,
   Scope.Scope
 > =>
@@ -302,7 +312,28 @@ export const workerdApps = (options: {
           );
         }),
       ).pipe(Effect.mapError(engineFailure));
-    return yield* connectedWorkerdApps(options.blobs, { rpc, changes, backend });
+    // Each command uses its own connection, like workflow requests above.
+    const evaluated = (app: string, command: EvaluatedCommand) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const url = new URL("/evaluated", origin);
+          url.searchParams.set("app", app);
+          const request = HttpClientRequest.post(url, {
+            headers: { ...headers, connection: "close" },
+          }).pipe(
+            HttpClientRequest.bodyText(
+              yield* Schema.encodeEffect(EvaluatedCommandJson)(command),
+              "application/json",
+            ),
+          );
+          const response = yield* http.execute(request);
+          if (response.status !== 200) return yield* protocolFailure();
+          return yield* response.text.pipe(
+            Effect.flatMap(Schema.decodeUnknownEffect(EvaluatedReplyJson)),
+          );
+        }),
+      ).pipe(Effect.mapError(protocolFailure));
+    return yield* connectedWorkerdApps(options.blobs, { rpc, changes, evaluated, backend });
   }).pipe(
     Effect.provide(NodeServices.layer),
     Effect.provide(FetchHttpClient.layer),

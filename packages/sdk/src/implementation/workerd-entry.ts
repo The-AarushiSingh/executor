@@ -31,6 +31,7 @@ import {
   FacetInvocation,
   type FacetBundle,
 } from "@executor-js/app-data/cloudflare";
+import { EvaluatedCommandJson, EvaluatedReplyJson } from "@executor-js/app-data/evaluated";
 import { makeAppRunner } from "./app-runner.ts";
 import { credentialFetch, credentialKey } from "./credential-handles.ts";
 import {
@@ -68,6 +69,7 @@ declare const WebSocketPair: { new (): { 0: NativeWebSocket; 1: NativeWebSocket 
 type Callback = (input: unknown) => Promise<unknown>;
 interface DataEntrypoint {
   cache(namespace: string, command: unknown): Promise<unknown>;
+  evaluated(command: unknown): Promise<unknown>;
   invoke(
     input: typeof FacetInvocation.Type,
     load: () => Promise<typeof FacetBundle.Type>,
@@ -380,6 +382,9 @@ export class AppDataSupervisor extends DurableObject<Environment> {
   async cache(namespace: string, command: unknown) {
     return Effect.runPromise((await this.#supervisor).cache(namespace, command));
   }
+  async evaluated(command: unknown) {
+    return Effect.runPromise((await this.#supervisor).evaluated(command));
+  }
   async cancel(id: string) {
     return Effect.runPromise((await this.#supervisor).cancel(id));
   }
@@ -542,6 +547,17 @@ export default {
       return newWorkersRpcResponse(request, new AppApi(env, context), rpcOptions);
     if (url.pathname === "/changes")
       return env.DATA.getByName(url.searchParams.get("app") ?? "").fetch(request);
+    // Evaluated results the host keeps in the app's supervisor, beside its app cache.
+    if (url.pathname === "/evaluated") {
+      const command = Schema.decodeUnknownOption(EvaluatedCommandJson)(await request.text());
+      if (command._tag === "None") return new Response(null, { status: 400 });
+      const reply = await env.DATA.getByName(url.searchParams.get("app") ?? "").evaluated(
+        command.value,
+      );
+      return new Response(Schema.encodeUnknownSync(EvaluatedReplyJson)(reply), {
+        headers: { "content-type": "application/json" },
+      });
+    }
     const input = Schema.decodeUnknownSync(
       Schema.Struct({
         operation: Schema.Literals(["start", "status", "terminate"]),

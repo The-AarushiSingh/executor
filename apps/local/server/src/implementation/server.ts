@@ -103,7 +103,7 @@ export const localApi = (
       const egress: HostEgress = { policy: config.urlPolicy, client: httpClient };
       const blobs = filesystemBlobStore({ directory: path.join(directory, "builds") });
       const ready = yield* Deferred.make<Executor>();
-      const { runtime, workflows } = yield* workerdApps({
+      const { runtime, workflows, declarations } = yield* workerdApps({
         directory: path.join(directory, "workerd"),
         blobs,
         executor: Deferred.await(ready),
@@ -140,6 +140,8 @@ export const localApi = (
         registry,
         cache: {
           memory: makeDeclarationCache(evaluation.limits),
+          // Kept in each app's supervisor too, so a restart does not evaluate every app again.
+          durable: declarations,
           toolListings: evaluation.toolListings,
         },
         // Stale declarations refresh on the server's own lifetime.

@@ -323,6 +323,27 @@ export const scenarios = plan({
       cloud: na("Cloudflare unloads Cloud's app Workers itself."),
     },
   },
+  keptListingsAfterRestart: {
+    fixtures: "actors",
+    file: "kept-listings.spec.ts",
+    title:
+      "after a restart and past their freshness, search and the skills index serve kept results without loading any app's Worker",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Kills and restarts a runner-owned product process."),
+      local: na("Local is covered by the local kept listings scenario."),
+    },
+  },
+  localKeptListingsAfterRestart: {
+    file: "kept-listings.spec.ts",
+    title:
+      "local search and skills index serve kept results after a restart without loading any app's Worker",
+    targets: {
+      local: scheduled,
+      "self-host": na("Hosted kept listings are covered through organization routes."),
+      cloud: na("Kills and restarts a runner-owned product process."),
+    },
+  },
   workflowReplayAccess: {
     fixtures: "actors",
     file: "workflow-replay-access.spec.ts",
@@ -3867,8 +3888,12 @@ export const scenarios = plan({
       "Cloud serves a tool listing its isolate cannot keep from the app's supervisor until an app cache invalidation",
     targets: {
       cloud: managedCloud,
-      "self-host": na("Self-host keeps evaluated results in its single server process."),
-      local: na("Local keeps evaluated results in its single server process."),
+      "self-host": na(
+        "Self-host's process store keeps a listing this large; the kept listings scenario reads its supervisor copy after a restart.",
+      ),
+      local: na(
+        "Local's process store keeps a listing this large; the local kept listings scenario reads its supervisor copy after a restart.",
+      ),
     },
   },
   buildFrameworkColdLoad: {
@@ -3955,8 +3980,10 @@ export const scenarios = plan({
       "Cloud writes the background refresh of a stale tool listing back to the app's supervisor",
     targets: {
       cloud: managedCloud,
-      "self-host": na("Self-host keeps evaluated results in its single server process."),
-      local: na("Local keeps evaluated results in its single server process."),
+      "self-host": na(
+        "Self-host serves these reads from its process store, which keeps them whole.",
+      ),
+      local: na("Local serves these reads from its process store, which keeps them whole."),
     },
   },
   durableEvaluatedSharedDefinitions: {
@@ -3966,8 +3993,10 @@ export const scenarios = plan({
       "Cloud keeps each JSON Schema definition a tool listing repeats once, in the isolate and in the app's supervisor",
     targets: {
       cloud: managedCloud,
-      "self-host": na("Self-host keeps evaluated results in its single server process."),
-      local: na("Local keeps evaluated results in its single server process."),
+      "self-host": na(
+        "Self-host serves these reads from its process store, which keeps them whole.",
+      ),
+      local: na("Local serves these reads from its process store, which keeps them whole."),
     },
   },
   durableEvaluatedDistinctDefinitions: {

@@ -21,10 +21,13 @@ import { appWorkerBudgetLimit as limit, appWorkerIdleSeconds, scenarios } from "
 const beyondLimit = { apps: 2, accountsPerApp: 3, database: false };
 /**
  * Apps with databases beyond the limit, each running its queries in its own data facet. A tool
- * call of such an app loads its facet and its app Worker, so it takes two of the limit's slots.
+ * call of such an app takes its kind from the kept tool listing, so it loads only its facet and
+ * takes one of the limit's slots. The first call of each selection also evaluates that listing in
+ * the app Worker; the sweeps after it would leave room for only half as many recent selections if
+ * a call loaded the app Worker as well.
  */
 const facetsBeyondLimit = { apps: limit + 2, accountsPerApp: 1, database: true };
-const facetCallWorkers = 2;
+const facetCallWorkers = 1;
 
 const Observation = Schema.Struct({
   isolate: Schema.String,
