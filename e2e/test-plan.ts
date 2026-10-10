@@ -3309,7 +3309,7 @@ export const scenarios = plan({
     fixtures: "actors",
     file: "app-account-picker.spec.ts",
     title:
-      "App account picker saves in place, retains failed choices and supports multiple accounts",
+      "App account picker opens from old setup links, saves in place, retains failed choices and supports multiple accounts",
     targets: {
       "self-host": scheduled,
       cloud: scheduled,

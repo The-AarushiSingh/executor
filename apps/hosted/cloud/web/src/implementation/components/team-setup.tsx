@@ -20,6 +20,7 @@ import {
   type SelectedOrganizationIcon,
 } from "@executor-js/hosted-web/contracts/organization-icon";
 import { Button } from "@executor-js/ui/components/button";
+// oxlint-disable-next-line no-restricted-imports -- OrganizationEntryGate renders it only at /, which its navigation leaves; TeamEntry reads atoms, not the location
 import { Link, Navigate, useLocation } from "@tanstack/react-router";
 import { Cause, Exit, Option, Schema } from "effect";
 import { AsyncResult, Atom } from "effect/reactivity";

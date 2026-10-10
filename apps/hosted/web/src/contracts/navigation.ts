@@ -98,11 +98,9 @@ export function hostedPageTitle(
       ? action === "custom"
         ? "Add custom app"
         : "Add app"
-      : action === "setup"
-        ? "Choose accounts"
-        : item
-          ? "App"
-          : "Apps";
+      : item
+        ? "App"
+        : "Apps";
   if (page === "accounts") return "Accounts";
   return "Dashboard";
 }
