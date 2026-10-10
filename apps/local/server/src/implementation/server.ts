@@ -78,6 +78,7 @@ import { AccountConnectApi } from "../contracts/account-connections.ts";
 import { browserTelemetry } from "./telemetry.ts";
 import { webFiles } from "./web.ts";
 import { withHostPipeline } from "@executor-js/dashboard-start/in-process";
+import { layerBuildHeader } from "@executor-js/dashboard-start/build-header";
 import { localManagementDocument } from "../contracts/management.ts";
 import { nativeRepositories } from "@executor-js/app-source/node";
 import { feedbackDisabled } from "@executor-js/telemetry/product-analytics";
@@ -363,6 +364,8 @@ export const localApi = (
         publicSkills,
       );
       const productRoutes = Layer.mergeAll(
+        // Dashboard pages compare this with their own build to notice an upgrade.
+        layerBuildHeader,
         publishedSkillRoutes(Effect.succeed(publicSkills)),
         HttpApiBuilder.layer(LocalWebhookSetupApi).pipe(
           Layer.provide(localWebhookSetupHandlers(executor, config, auth)),

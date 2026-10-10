@@ -728,6 +728,17 @@ export const scenarios = plan({
       local: na("The local dashboard does not batch its reads; most of them are live streams"),
     },
   },
+  dashboardBuildChange: {
+    fixtures: "actors",
+    file: "dashboard-read-batches.spec.ts",
+    title:
+      "A dashboard tab left open across a server upgrade offers a reload and explains its refused reads as the update",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Managed Cloud cannot restart its Workers as another build"),
+      local: na("The local dashboard does not batch its reads; self-host covers the shared check"),
+    },
+  },
   appCacheStalledLoader: {
     fixtures: "actors",
     file: "app-cache-stalled-loader.spec.ts",
