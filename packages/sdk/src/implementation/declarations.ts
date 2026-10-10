@@ -447,8 +447,12 @@ export const makeDeclarations = (options: {
                 Effect.andThen(serve(found)),
               )
             : undefined;
+        // A reader that does not refresh waits for the whole durable read: an evaluation beside
+        // it would load the app's Worker and replace the kept result the read then serves.
         const early = yield* Fiber.join(recalling).pipe(
-          Effect.timeoutOption(durableHeadStartMillis),
+          policy.refreshStale === false
+            ? Effect.map(Option.some)
+            : Effect.timeoutOption(durableHeadStartMillis),
         );
         if (Option.isSome(early)) return yield* recalled(early.value) ?? miss;
         // A slow supervisor, often one waking up, would delay every miss: evaluate beside the

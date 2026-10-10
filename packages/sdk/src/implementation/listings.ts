@@ -381,8 +381,10 @@ export const makeListings = (options: {
             ),
           ),
         );
+        // A reader that does not refresh waits for the whole durable read: an evaluation beside
+        // it would load the app's Worker and replace the kept listing the read then serves.
         const recalled = yield* Fiber.join(recalling).pipe(
-          Effect.timeoutOption(durableHeadStartMillis),
+          refreshes ? Effect.timeoutOption(durableHeadStartMillis) : Effect.map(Option.some),
         );
         if (Option.isSome(recalled) && recalled.value !== undefined)
           return yield* serve(recalled.value.at, recalled.value.listed, "durable");
