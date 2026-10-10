@@ -73,6 +73,10 @@ const errorMessage = Match.type<HostedError>().pipe(
       error.reason === "conflict"
         ? "The source changed elsewhere. Reload it before saving again."
         : "The app source could not be saved or loaded. Check its files and try again.",
+    SourcePathConflict: ({ file, nested }) =>
+      `${file} is a file, so ${nested} cannot be inside it. Rename or remove one, then save again.`,
+    SourcePathNotUnicode: ({ path }) =>
+      `The file path ${JSON.stringify(path)} is not valid Unicode. Rename the file, then save again.`,
     AppNotFound: () => "This app is no longer available in this organization.",
     SkillRevisionChanged: () =>
       "Skills changed. Reload the skill to read its current instructions and references.",

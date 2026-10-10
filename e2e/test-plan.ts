@@ -4957,18 +4957,18 @@ export const scenarios = plan({
     fixtures: "actors",
     file: "app-management-contracts.spec.ts",
     title:
-      "hosted agents read the apps release, are refused create without files, deploy the documented two-file app, and get commit and deploy results as objects",
+      "hosted agents read the apps release, are refused create without files, deploy the documented two-file app, get commit and deploy results as objects, see the files a commit removed, are refused a file inside a file, and learn the tool-only app has no UI",
     managementProfiles: ["owner"],
     targets: {
       "self-host": scheduled,
-      cloud: scheduled,
+      cloud: sourceStorageCloud,
       local: na("Local runs the same agent programs in its own scenario."),
     },
   },
   appManagementContractsLocal: {
     file: "app-management-contracts.spec.ts",
     title:
-      "local agents read the apps release, are refused create without files, deploy the documented two-file app, and get commit and deploy results as objects",
+      "local agents read the apps release, are refused create without files, deploy the documented two-file app, get commit and deploy results as objects, see the files a commit removed, and are refused a file inside a file",
     targets: {
       local: scheduled,
       "self-host": na("Hosted organizations run the same agent programs in their own scenario."),
@@ -5786,6 +5786,17 @@ export const scenarios = plan({
       local: na("Self-host invitation signup."),
       "self-host": scheduled,
       cloud: na("Cloud requires a verified recipient instead of password registration."),
+    },
+  },
+  appUiWithoutAppDomain: {
+    file: "app-ui-without-app-domain.spec.ts",
+    title: "a self-host with no app domain says an app UI has no address because of the domain",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Cloud always has an app domain."),
+      local: na(
+        "Local serves app UIs from its own origin; only self-host starts a scenario-owned server.",
+      ),
     },
   },
   remoteRegistryFailures: {

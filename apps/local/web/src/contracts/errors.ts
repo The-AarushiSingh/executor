@@ -124,6 +124,16 @@ const errorMessage = Match.type<DashboardError>().pipe(
             "Source unavailable",
             "The app source could not be saved or loaded. Check its files and try again.",
           ),
+    SourcePathConflict: ({ file, nested }) =>
+      message(
+        "File and folder share a path",
+        `${file} is a file, so ${nested} cannot be inside it. Rename or remove one, then save again.`,
+      ),
+    SourcePathNotUnicode: ({ path }) =>
+      message(
+        "File path is not valid Unicode",
+        `The file path ${JSON.stringify(path)} is not valid Unicode. Rename the file, then save again.`,
+      ),
     AppNotFound: () =>
       message(
         "App not found",

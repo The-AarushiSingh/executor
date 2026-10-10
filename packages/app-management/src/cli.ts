@@ -517,7 +517,7 @@ export const appsCommand = (platform: string) =>
         ),
       }).pipe(
         Command.withDescription(
-          "Save a complete new source snapshot as a commit without deploying it. Prints the new revision; deploy its commit with executor apps deploy",
+          "Save a complete new source snapshot as a commit without deploying it. Files missing from it are deleted. Prints the new revision, the count of removed files and at most 100 of their paths; deploy its commit with executor apps deploy",
         ),
         Command.withHandler((args) =>
           Effect.gen(function* () {
