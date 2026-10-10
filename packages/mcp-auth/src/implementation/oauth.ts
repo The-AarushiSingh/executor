@@ -191,6 +191,8 @@ export interface GrantOAuthOptions {
 const accessTokenSeconds = 3600;
 /** Better Auth's default refresh token lifetime, stated because idle grant expiry follows it. */
 const refreshTokenSeconds = 30 * 24 * 3600;
+/** How long after rotation a stale copy is refused without revoking its family. */
+const supersededRefreshSeconds = 24 * 3600;
 /** Why a grant was or was not expired; see `idleGrants`. */
 export const GrantExpiryOutcome = Schema.Literals([
   /** Revoked now: no usable token and idle for the whole window. */
@@ -236,8 +238,11 @@ export const grantOAuthPlugins = (settings: GrantOAuthOptions) => {
     // MCP clients often run several instances from one stored grant, each refreshing its own
     // copy. A sibling presenting a token rotated while that rotation's access token is still
     // live receives the same response instead of revoking every token for the client and user.
-    // Later reuse still revokes the family.
     refreshTokenReuseInterval: accessTokenSeconds,
+    // An idle instance can hold a copy rotated hours ago and present it when it closes or
+    // reconnects; Codex does so without rereading the shared store. Refuse that copy alone for a
+    // day after its rotation. Later reuse, or reuse of a revoked token, still revokes the family.
+    refreshTokenSupersededInterval: supersededRefreshSeconds,
     ...(settings.onRefreshRejected === undefined
       ? {}
       : { onRefreshRejected: settings.onRefreshRejected }),
