@@ -1792,6 +1792,17 @@ export const scenarios = plan({
       ),
     },
   },
+  siteVisitorAttribution: {
+    file: "site-visitor-attribution.spec.ts",
+    title:
+      "Cloud links the site's anonymous visitor to the account they sign up for, then clears it",
+    targets: {
+      // The server's events are read from the managed run's loopback collector.
+      cloud: managedCloud,
+      "self-host": na("Self-host does not serve the marketing site or export product analytics."),
+      local: na("Local does not serve the marketing site or export product analytics."),
+    },
+  },
   productAnalytics: {
     fixtures: "actors",
     file: "product-analytics.spec.ts",

@@ -156,6 +156,10 @@ export const startCloudEnvironment = (input: {
       VITE_POSTHOG_KEY: "synthetic-ingestion-key",
       VITE_POSTHOG_PATH: "/api/0123456789abcdef",
       VITE_POSTHOG_HOST: `http://127.0.0.1:${analyticsPort}`,
+      // The site's own build reads the same synthetic project, so its pages run PostHog too.
+      PUBLIC_POSTHOG_KEY: "synthetic-ingestion-key",
+      PUBLIC_POSTHOG_PATH: "/api/0123456789abcdef",
+      PUBLIC_POSTHOG_HOST: `http://127.0.0.1:${analyticsPort}`,
       VITE_EXECUTOR_ENVIRONMENT: "test-local",
       // Serve the same built assets and routing as a deployed stage. Vite's
       // on-demand source transforms must not compete with timed scenarios.
