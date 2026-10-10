@@ -437,7 +437,7 @@ export const makeAppRunner = (host: AppRunnerHost) => {
           name === null || residency === undefined
             ? Effect.void
             : yield* Effect.acquireRelease(
-                residency.hold(name, namedWorker(host.loader, name)),
+                residency.hold(name, namedWorker(host.loader, name), host.waitUntil),
                 (unhold) => (held ? Effect.void : unhold),
               );
         const services = yield* Effect.context<never>();
@@ -707,13 +707,17 @@ export const makeAppRunner = (host: AppRunnerHost) => {
               // The facet Worker counts against the same limit as app Workers while it is loaded.
               const unloadFacet = host.unloadFacet;
               if (host.residency !== undefined && unloadFacet !== undefined) {
-                const hold = host.residency.hold(`data:${name}`, {
-                  run: unloadFacet(invocation.app, identity).pipe(
-                    Effect.orElseSucceed(() => false),
-                  ),
-                  // The supervisor replaces a facet Worker whose unload does not settle.
-                  abandon: () => undefined,
-                });
+                const hold = host.residency.hold(
+                  `data:${name}`,
+                  {
+                    run: unloadFacet(invocation.app, identity).pipe(
+                      Effect.orElseSucceed(() => false),
+                    ),
+                    // The supervisor replaces a facet Worker whose unload does not settle.
+                    abandon: () => undefined,
+                  },
+                  host.waitUntil,
+                );
                 yield* Effect.acquireRelease(hold, (unhold) => unhold).pipe(Effect.asVoid);
               }
               return yield* facet(

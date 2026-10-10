@@ -15,7 +15,7 @@ import { Target } from "../support/platform.ts";
 import { createProfile, selectProfileAccounts } from "../support/profiles.ts";
 import { requestGate } from "../support/request-gate.ts";
 import { appsManifest, databaseFiles } from "../support/apps-release.ts";
-import { appWorkerBudgetLimit as limit, scenarios } from "../test-plan.ts";
+import { appWorkerBudgetLimit as limit, appWorkerIdleSeconds, scenarios } from "../test-plan.ts";
 
 /** Apps and account selections beyond the limit: two apps with three accounts each. */
 const beyondLimit = { apps: 2, accountsPerApp: 3, database: false };
@@ -495,6 +495,47 @@ const replacedFacetUnloadedAfterEviction = (selections: ReadonlyArray<Selection>
     expect(otherAgain.calls).toBe(1);
   });
 
+/** One app with two accounts, one called and left idle and one kept busy, and an app with a database. */
+const idleWorkers = { apps: 1, accountsPerApp: 2, database: false };
+const idleFacet = { apps: 1, accountsPerApp: 1, database: true };
+/** Longer than the idle time, with room for the sweep to unload what expired. */
+const idleLongEnough = `${appWorkerIdleSeconds * 2 + 2} seconds` as const;
+
+/**
+ * Below the limit, an app Worker and a data facet left idle for the configured idle time are
+ * unloaded while the scenario makes no requests, so the next call starts a fresh isolate. A Worker
+ * with a call in flight for longer than the idle time stays loaded, and so does one released just
+ * now.
+ */
+const idleUnloaded = (workers: ReadonlyArray<Selection>, facets: ReadonlyArray<Selection>) =>
+  Effect.gen(function* () {
+    const [idle, busy] = workers as [Selection, Selection];
+    const [facet] = facets as [Selection];
+    const idleBefore = yield* observe(idle);
+    const facetBefore = yield* observe(facet);
+    const busyBefore = yield* observe(busy);
+    const gate = yield* requestGate;
+    const pending = yield* observe(busy, `${gate.origin}/wait`).pipe(Effect.forkChild);
+    yield* gate.arrived;
+    // No requests reach the product while the idle time passes; only the busy call is in flight.
+    yield* Effect.sleep(idleLongEnough);
+    yield* gate.release;
+    const during = yield* Fiber.join(pending);
+    expect(during.isolate, "the Worker with a call in flight stayed loaded").toBe(
+      busyBefore.isolate,
+    );
+    expect(during.calls).toBe(busyBefore.calls + 1);
+    const after = yield* observe(busy);
+    expect(after.isolate, "a Worker released just now stays loaded").toBe(busyBefore.isolate);
+    expect(after.calls).toBe(during.calls + 1);
+    const idleAgain = yield* observe(idle);
+    expect(idleAgain.isolate, "the idle Worker was unloaded").not.toBe(idleBefore.isolate);
+    expect(idleAgain.calls).toBe(1);
+    const facetAgain = yield* observe(facet);
+    expect(facetAgain.isolate, "the idle data facet was unloaded").not.toBe(facetBefore.isolate);
+    expect(facetAgain.calls).toBe(1);
+  });
+
 /** One app with one account, with or without a database. */
 const collectedWorker = { apps: 1, accountsPerApp: 1, database: false };
 const collectedFacet = { apps: 1, accountsPerApp: 1, database: true };
@@ -532,6 +573,19 @@ layer(HostedLive, { excludeTestServices: true })("App Worker budget", (it) => {
         Effect.gen(function* () {
           yield* hostedSelections(collectedWorker).pipe(Effect.flatMap(garbageCollected));
           yield* hostedSelections(collectedFacet).pipe(Effect.flatMap(garbageCollected));
+        }),
+      ),
+    { timeout: 120_000 },
+  );
+  it.effect(
+    scenarios.appWorkerIdleUnloaded.title,
+    (context) =>
+      withHostedCase(
+        context,
+        Effect.gen(function* () {
+          const workers = yield* hostedSelections(idleWorkers);
+          const facets = yield* hostedSelections(idleFacet);
+          yield* idleUnloaded(workers, facets);
         }),
       ),
     { timeout: 120_000 },

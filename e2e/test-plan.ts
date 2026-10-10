@@ -64,6 +64,8 @@ const cloudOnboarding = {
 
 /** App Workers the budget scenarios keep loaded; their spec asserts this limit. */
 export const appWorkerBudgetLimit = 2;
+/** Seconds an idle app Worker stays loaded in the idle unloading scenario. */
+export const appWorkerIdleSeconds = 4;
 /** A relay callback in a valid form other than its serialization, which the SDK sends. */
 export const oauthRelayCallback =
   "https://Relay.Executor.example:443/api/oauth/callback?tenant=fixture";
@@ -270,6 +272,19 @@ export const scenarios = plan({
       "self-host": scheduled,
       cloud: na("Cloudflare unloads Cloud's app Workers itself."),
       local: na("Local is covered by the local app Worker budget scenario."),
+    },
+  },
+  appWorkerIdleUnloaded: {
+    fixtures: "actors",
+    file: "app-worker-budget.spec.ts",
+    title: "app Workers and data facets left idle unload below the limit; busy ones stay loaded",
+    serverEnvironment: { EXECUTOR_APP_WORKER_IDLE_SECONDS: String(appWorkerIdleSeconds) },
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Cloudflare unloads Cloud's app Workers itself."),
+      local: na(
+        "Self-host covers the shared runner's Worker residency; the local budget scenario covers local's limit.",
+      ),
     },
   },
   appWorkerBudgetInFlight: {

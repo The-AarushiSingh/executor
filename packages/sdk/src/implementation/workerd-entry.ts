@@ -35,6 +35,7 @@ import { makeAppRunner } from "./app-runner.ts";
 import { credentialFetch, credentialKey } from "./credential-handles.ts";
 import {
   defaultAppWorkerLimit,
+  defaultAppWorkerIdleSeconds,
   makeAppWorkerResidency,
   type AppWorkerResidency,
 } from "./app-worker-residency.ts";
@@ -114,6 +115,8 @@ interface Environment {
   readonly LOADER: WorkerLoader;
   /** Most app Workers this process keeps loaded, or null for the default. */
   readonly APP_WORKERS?: number | null;
+  /** Seconds an idle app Worker stays loaded, zero for no idle unloading, or null for the default. */
+  readonly APP_WORKER_IDLE_SECONDS?: number | null;
   readonly DATA: { getByName(name: string): DataEntrypoint };
   readonly RUNS: Workflow<{ run: string }>;
   readonly HOST: Fetcher;
@@ -192,7 +195,10 @@ let residency: AppWorkerResidency | undefined;
 const runner = (env: Environment, context: Pick<ExecutionContext, "waitUntil" | "exports">) =>
   makeAppRunner({
     loader: env.LOADER,
-    residency: (residency ??= makeAppWorkerResidency(env.APP_WORKERS ?? defaultAppWorkerLimit)),
+    residency: (residency ??= makeAppWorkerResidency({
+      limit: env.APP_WORKERS ?? defaultAppWorkerLimit,
+      idleSeconds: env.APP_WORKER_IDLE_SECONDS ?? defaultAppWorkerIdleSeconds,
+    })),
     // A later call's trim runs this, so the stub is made then, in that call's request.
     unloadFacet: (app, identity) =>
       Effect.tryPromise({

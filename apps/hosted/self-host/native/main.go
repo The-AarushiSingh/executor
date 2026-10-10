@@ -514,6 +514,16 @@ func serve(mode string) error {
 		appWorkers = strconv.Itoa(number)
 	}
 	config = bytes.ReplaceAll(config, []byte("@@APP_WORKERS@@"), []byte(appWorkers))
+	// Seconds an idle app Worker stays loaded; zero turns idle unloading off, null keeps the default.
+	appWorkerIdle := "null"
+	if value := values["EXECUTOR_APP_WORKER_IDLE_SECONDS"]; value != "" {
+		number, err := strconv.Atoi(value)
+		if err != nil || number < 0 {
+			return errors.New("EXECUTOR_APP_WORKER_IDLE_SECONDS must be a non-negative integer")
+		}
+		appWorkerIdle = strconv.Itoa(number)
+	}
+	config = bytes.ReplaceAll(config, []byte("@@APP_WORKER_IDLE_SECONDS@@"), []byte(appWorkerIdle))
 	config = bytes.ReplaceAll(config, []byte("@@SELF_ORIGIN@@"), []byte(strconv.Quote(values["BETTER_AUTH_URL"])))
 	// App builds install packages from this registry; empty selects the public registry.
 	registry := values["EXECUTOR_NPM_REGISTRY"]

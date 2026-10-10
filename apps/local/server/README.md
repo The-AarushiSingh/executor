@@ -66,6 +66,7 @@ directory. `bun run with:local …` loads 1Password values instead; see
 | `EXECUTOR_TOOL_LISTING_LOAD_SECONDS`    | Stop evaluating an app's tool list after this long when no request is waiting for it; defaults to `45`.                                                                                     |
 | `EXECUTOR_EVALUATION_MEMORY_MB`         | Memory for kept tool lists and app declarations; defaults to `256`.                                                                                                                         |
 | `EXECUTOR_APP_WORKERS`                  | Most app and data Workers kept loaded; defaults to `64`. Idle ones above it unload and reload on their next call. An app with a database runs its calls in a data Worker, which counts too. |
+| `EXECUTOR_APP_WORKER_IDLE_SECONDS`      | Unload an app or data Worker not called for this long, even below `EXECUTOR_APP_WORKERS`; `0` turns this off. Defaults to `300`.                                                            |
 
 ### Key storage
 
