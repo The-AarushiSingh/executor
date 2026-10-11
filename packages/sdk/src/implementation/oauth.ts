@@ -638,10 +638,8 @@ export const makeOAuth = (
           : "manual";
       // A client saved at a callback this host sent before is registered with that callback only.
       // Executor can replace one it registered or read from its metadata document, so those sign
-      // in again at the current callback. Only a client someone entered, or one for a server that
-      // offers no other way, keeps sending the old callback, since only its owner can change what
-      // the provider allows. A record saved before sources were recorded counts as registered
-      // where the server registers clients.
+      // in again at the current callback. Only a client someone entered keeps sending the old
+      // callback, since only its owner can change what the provider allows.
       const previous =
         redirect === undefined
           ? []
@@ -662,12 +660,9 @@ export const makeOAuth = (
           if (saved === null) continue;
           const registered = yield* decrypt(id, saved.encrypted, OAuthRegistration);
           const metadata = yield* decrypt(id, saved.encrypted, OAuthSavedClientMetadata);
-          if (
-            candidate !== redirect &&
-            metadata.executor_source !== "manual" &&
-            registration !== "manual"
-          )
-            continue;
+          // Previous callbacks: only reuse clients the operator entered. Anything Executor
+          // registered (or saved before sources existed) must sign in again at `redirect`.
+          if (candidate !== redirect && metadata.executor_source !== "manual") continue;
           if (
             registered.client_secret_expires_at !== undefined &&
             registered.client_secret_expires_at !== 0 &&
