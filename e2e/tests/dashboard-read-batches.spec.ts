@@ -232,19 +232,18 @@ layer(HostedLive, { excludeTestServices: true })("Dashboard read batches", (it) 
           { origin: "https://attacker.example" },
         );
         expect(crossSite.status).toBe(403);
+
         // Behind a TLS-terminating proxy the server sees http:// while the browser sends https://.
         const target = yield* Target;
         const pageOrigin = targetHosts(target).browser;
         const proxiedOrigin = `https://${new URL(pageOrigin).host}`;
         const proxied = { reads: [read("viewer", "get")] };
-
         // The proxy reports https, so the page's own origin is accepted.
         const viaProxy = yield* api.request(actors.member, "POST", batchPath, proxied, {
           origin: proxiedOrigin,
           "x-forwarded-proto": "https",
         });
         expect(viaProxy.status).not.toBe(403);
-
         // Without that header the scheme still has to match. This only holds where the server itself
         // sees http (self-host); a target that is https end to end already matches.
         if (new URL(pageOrigin).protocol === "http:") {
@@ -253,7 +252,6 @@ layer(HostedLive, { excludeTestServices: true })("Dashboard read batches", (it) 
           });
           expect(noProxyHeader.status).toBe(403);
         }
-
         // The proxy header never lets another host in.
         const foreign = yield* api.request(actors.member, "POST", batchPath, proxied, {
           origin: "https://attacker.example",
