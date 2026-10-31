@@ -9426,7 +9426,16 @@ export const scenarios = plan({
     targets: {
       "self-host": scheduled,
       cloud: scheduled,
-      local: na("Local shares these contracts; the hosted routes exercise them."),
+      local: na("Local's SDK routes are covered by the local schedule input validation scenario."),
+    },
+  },
+  localScheduleInputValidation: {
+    file: "local-schedule-input-validation.spec.ts",
+    title: "The SDK schedule routes refuse names, IDs and actors that storage cannot hold",
+    targets: {
+      local: scheduled,
+      "self-host": na("SDK route fixture; hosted routes are covered by the hosted scenario."),
+      cloud: na("SDK route fixture; hosted routes are covered by the hosted scenario."),
     },
   },
   scheduledRunRedeploy: {

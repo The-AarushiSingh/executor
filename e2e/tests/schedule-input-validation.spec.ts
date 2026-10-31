@@ -12,8 +12,8 @@ const source = `import { defineApp, mutation, userInterval, object, router } fro
 const work = mutation({ input: object({}) }, async () => ({ done: true }));
 export default defineApp({}, async () => ({ tools: router({ work }), schedules: { review: userInterval({ minutes: 1 }, work, {}) } }));`;
 
-/** A NUL cannot be stored; a tab and a line break are control characters no name or ID holds. */
-const controls = ["%00", "a%00b", "%09", "%0A"];
+/** A NUL cannot be stored, so a name or ID that carries one is refused before it is looked up. */
+const withNul = ["%00", "a%00b"];
 const unknownCopy = "sch_00000000-0000-4000-8000-000000000000";
 const unknownRun = "run_00000000-0000-4000-8000-000000000000";
 
@@ -38,38 +38,40 @@ layer(HostedLive, { excludeTestServices: true })("Schedule input validation", (i
         const refused = (label: string, response: { status: number; body: unknown }) =>
           expect(response.status, `${label}: ${JSON.stringify(response.body)}`).toBe(400);
 
-        for (const control of controls) {
+        for (const nul of withNul) {
           // The schedule's name, in the routes that take it.
           refused(
-            `configure ${control}`,
-            yield* api.request(actors.owner, "PATCH", `${path}/${control}`, { enabled: false }),
+            `configure ${nul}`,
+            yield* api.request(actors.owner, "PATCH", `${path}/${nul}`, { enabled: false }),
           );
-          refused(
-            `run ${control}`,
-            yield* api.request(actors.owner, "POST", `${path}/${control}/run`),
-          );
+          refused(`run ${nul}`, yield* api.request(actors.owner, "POST", `${path}/${nul}/run`));
           // A copy's ID, under a schedule that exists.
-          const copy = `${path}/review/copies/${control}`;
+          const copy = `${path}/review/copies/${nul}`;
           refused(
-            `update copy ${control}`,
+            `update copy ${nul}`,
             yield* api.request(actors.owner, "PATCH", copy, { enabled: false }),
           );
-          refused(`run copy ${control}`, yield* api.request(actors.owner, "POST", `${copy}/run`));
-          refused(`remove copy ${control}`, yield* api.request(actors.owner, "DELETE", copy));
+          refused(`run copy ${nul}`, yield* api.request(actors.owner, "POST", `${copy}/run`));
+          refused(`remove copy ${nul}`, yield* api.request(actors.owner, "DELETE", copy));
           // A run's ID, where its approval is read and answered.
-          const approval = `${prefix}/scheduled-runs/${control}/approval`;
-          refused(`read approval ${control}`, yield* api.request(actors.owner, "GET", approval));
+          const approval = `${prefix}/scheduled-runs/${nul}/approval`;
+          refused(`read approval ${nul}`, yield* api.request(actors.owner, "GET", approval));
           refused(
-            `answer approval ${control}`,
+            `answer approval ${nul}`,
             yield* api.request(actors.owner, "POST", approval, { response: { action: "decline" } }),
           );
         }
 
-        // Names and IDs without control characters keep their answers: an unknown one is not found,
-        // an unknown run has nothing to review, and a declared schedule is configured.
+        // Names and IDs without NUL keep their answers: an unknown one is not found, an unknown run
+        // has nothing to review, and a declared schedule is configured. Other control characters
+        // are not refused: a name with a tab is merely not found.
         for (const response of [
           yield* api.request(actors.owner, "PATCH", `${path}/missing`, { enabled: false }),
           yield* api.request(actors.owner, "POST", `${path}/missing/run`),
+          yield* api.request(actors.owner, "PATCH", `${path}/%09`, { enabled: false }),
+          yield* api.request(actors.owner, "PATCH", `${path}/review/copies/%09`, {
+            enabled: false,
+          }),
           yield* api.request(actors.owner, "PATCH", `${path}/review/copies/${unknownCopy}`, {
             enabled: false,
           }),
