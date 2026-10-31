@@ -9419,6 +9419,16 @@ export const scenarios = plan({
       local: na("Local does not have organization memberships."),
     },
   },
+  scheduleInputValidation: {
+    fixtures: "actors",
+    file: "schedule-input-validation.spec.ts",
+    title: "Schedule names and IDs that storage cannot hold are refused as bad requests",
+    targets: {
+      "self-host": scheduled,
+      cloud: scheduled,
+      local: na("Local shares these contracts; the hosted routes exercise them."),
+    },
+  },
   scheduledRunRedeploy: {
     fixtures: "actors",
     file: "scheduled-run-redeploy.spec.ts",

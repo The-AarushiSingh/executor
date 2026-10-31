@@ -27,11 +27,23 @@ import { OAuthReconnectRequired, OAuthRenewalFailed } from "./oauth.ts";
 import { CredentialsError } from "./shared.ts";
 import { AppProviderFailed, AppEvaluationFailed, ToolInvocation } from "./tools.ts";
 
+/**
+ * Control characters, as code-unit ranges so the pattern the API document publishes means the same
+ * in every engine. Storage cannot hold NUL, so a route parameter that carries one is refused as a
+ * bad request instead of failing the lookup it reaches.
+ */
+const withoutControlCharacters = Schema.isPattern(/^[^\u0000-\u001F\u007F-\u009F]*$/u);
+/** A schedule's name, as an app declares it, in a route. */
+export const ScheduleName = Schema.NonEmptyString.check(withoutControlCharacters);
 /** Stable configured schedule address, independent of app versions. */
-export const ScheduleId = Schema.NonEmptyString.pipe(Schema.brand("ScheduleId"));
+export const ScheduleId = Schema.NonEmptyString.check(withoutControlCharacters).pipe(
+  Schema.brand("ScheduleId"),
+);
 export type ScheduleId = typeof ScheduleId.Type;
 /** One scheduled occurrence or explicit run-now attempt. */
-export const ScheduledRunId = Schema.NonEmptyString.pipe(Schema.brand("ScheduledRunId"));
+export const ScheduledRunId = Schema.NonEmptyString.check(withoutControlCharacters).pipe(
+  Schema.brand("ScheduledRunId"),
+);
 export type ScheduledRunId = typeof ScheduledRunId.Type;
 /** Browser review is opt-in. Automatic accepts approval requests, never explicit denials. */
 export const ScheduleApprovalMode = Schema.Literals(["automatic", "browser"]);
